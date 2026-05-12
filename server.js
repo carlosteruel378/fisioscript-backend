@@ -1,11 +1,17 @@
 import express from "express";
 import cors from "cors";
+import Stripe from "stripe";
 import "dotenv/config";
-
+ 
 const app = express();
 const PORT = process.env.PORT || 3001;
-
-// Rate limiting
+ 
+// Stripe (solo se inicializa si hay key configurada)
+const stripe = process.env.STRIPE_SECRET_KEY
+  ? new Stripe(process.env.STRIPE_SECRET_KEY)
+  : null;
+ 
+// ── Rate limiting ────────────────────────────────────────────────────────────
 const rateLimitMap = new Map();
 function rateLimit(maxReqs, windowMs) {
   return (req, res, next) => {
@@ -16,48 +22,57 @@ function rateLimit(maxReqs, windowMs) {
     reqs.push(now); rateLimitMap.set(ip, reqs); next();
   };
 }
-
-// Security headers
+ 
+// ── Security headers ─────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   next();
 });
-
-// CORS
+ 
+// ── CORS ─────────────────────────────────────────────────────────────────────
 const allowedOrigins = [
   "http://localhost:3000", "http://localhost:5500",
   "http://127.0.0.1:5500", "http://127.0.0.1:3000",
   process.env.FRONTEND_URL,
 ].filter(Boolean);
-
+ 
 app.use(cors({
   origin: (origin, cb) => (!origin || allowedOrigins.includes(origin)) ? cb(null, true) : cb(new Error("CORS no permitido")),
 }));
-
+ 
+// Stripe webhook necesita el body RAW — debe ir ANTES de express.json()
+app.use("/api/stripe/webhook", express.raw({ type: "application/json" }));
+ 
 app.use(express.json({ limit: "1mb" }));
-
+ 
+// ── Logging ──────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   const start = Date.now();
-  res.on("finish", () => console.log(`${req.method} ${req.path} ${res.statusCode} ${Date.now()-start}ms`));
+  res.on("finish", () => console.log(`${req.method} ${req.path} ${res.statusCode} ${Date.now() - start}ms`));
   next();
 });
-
-app.get("/", (req, res) => res.json({ status: "ok", service: "FisioScript API v2.0" }));
-
+ 
+// ── Health check ─────────────────────────────────────────────────────────────
+app.get("/", (req, res) => res.json({
+  status: "ok",
+  service: "FisioScript API v2.0",
+  stripe: stripe ? "configurado" : "no configurado",
+}));
+ 
 // ── POST /api/generate ───────────────────────────────────────────────────────
 app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
   const { text } = req.body;
-
+ 
   if (!text || typeof text !== "string") return res.status(400).json({ error: "El campo 'text' es requerido." });
   if (text.trim().length < 10) return res.status(400).json({ error: "Transcripción demasiado corta." });
   if (text.length > 15_000) return res.status(400).json({ error: "Transcripción demasiado larga." });
   if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Servidor mal configurado." });
-
+ 
   const system = `Eres un fisioterapeuta clínico experto en documentación y razonamiento clínico.
 Analiza la transcripción de una consulta de fisioterapia y extrae TODA la información posible.
 Devuelve ÚNICAMENTE este JSON exacto, sin markdown ni texto adicional:
-
+ 
 {
   "historia": {
     "motivo": "motivo de consulta detallado con localización, inicio y características",
@@ -109,19 +124,18 @@ Devuelve ÚNICAMENTE este JSON exacto, sin markdown ni texto adicional:
     }
   ]
 }
-
+ 
 REGLAS IMPORTANTES:
-- Si algo no se menciona en la transcripción, usa array vacío [] para listas o "No mencionado" para campos de texto.
-- Para banderas_rojas: busca síntomas de alarma como pérdida de peso inexplicada, dolor nocturno que no cede, déficit neurológico progresivo, traumatismo de alta energía, antecedentes oncológicos, fiebre, disfunción de esfínteres, etc.
-- Para banderas_amarillas: busca factores psicosociales como catastrofismo, kinesiofobia, baja autoeficacia, factores laborales, depresión/ansiedad, dolor crónico, baja adherencia al tratamiento.
-- Para hipotesis: la confianza es un número entre 0 y 1 basado en la cantidad y calidad de información disponible. Sé conservador si la información es escasa.
-- Para tests: incluye TODOS los tests mencionados aunque sea de forma implícita (ej: "le hago el Lasègue" → nombre: "Test de Lasègue", estructura: "Nervio ciático / raíz nerviosa lumbar").
-- Usa terminología clínica de fisioterapia en español.
-- Extrae TODA la información posible aunque esté implícita en la conversación.`;
-
+- Si algo no se menciona, usa array vacío [] para listas o "No mencionado" para texto.
+- Para banderas_rojas: busca síntomas de alarma como pérdida de peso inexplicada, dolor nocturno, déficit neurológico progresivo, antecedentes oncológicos, fiebre, disfunción de esfínteres, etc.
+- Para banderas_amarillas: busca factores psicosociales como catastrofismo, kinesiofobia, baja autoeficacia, factores laborales, depresión/ansiedad.
+- Para hipotesis: confianza entre 0 y 1. Sé conservador si la información es escasa.
+- Para tests: incluye TODOS los tests mencionados aunque sea implícitamente.
+- Usa terminología clínica de fisioterapia en español.`;
+ 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
-
+ 
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -140,48 +154,41 @@ REGLAS IMPORTANTES:
       }),
       signal: controller.signal,
     });
-
+ 
     clearTimeout(timeout);
-
+ 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
       console.error("Groq error:", err);
       if (response.status === 429) return res.status(429).json({ error: "Servicio saturado. Inténtalo en unos segundos." });
       return res.status(502).json({ error: "Error al procesar con IA." });
     }
-
+ 
     const data = await response.json();
     const raw = data.choices?.[0]?.message?.content || "";
-
     const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) {
-      console.error("No JSON found in:", raw.substring(0, 300));
-      return res.status(502).json({ error: "Respuesta inesperada de la IA." });
-    }
-
+    if (!match) return res.status(502).json({ error: "Respuesta inesperada de la IA." });
+ 
     let parsed;
     try { parsed = JSON.parse(match[0]); }
-    catch (e) { console.error("JSON parse error:", e.message); return res.status(502).json({ error: "Error al parsear la respuesta." }); }
-
-    // Ensure all keys exist with defaults
+    catch (e) { return res.status(502).json({ error: "Error al parsear la respuesta." }); }
+ 
     parsed.historia = parsed.historia || {};
     parsed.soap = parsed.soap || {};
     parsed.banderas_rojas = Array.isArray(parsed.banderas_rojas) ? parsed.banderas_rojas : [];
     parsed.banderas_amarillas = Array.isArray(parsed.banderas_amarillas) ? parsed.banderas_amarillas : [];
     parsed.hipotesis = parsed.hipotesis || {};
     parsed.tests = Array.isArray(parsed.tests) ? parsed.tests : [];
-
-    // Normalize test results to lowercase
     parsed.tests = parsed.tests.map(t => ({
       ...t,
       resultado: (t.resultado || '').toLowerCase().includes('pos') ? 'positivo'
         : (t.resultado || '').toLowerCase().includes('neg') ? 'negativo'
         : t.resultado || '',
     }));
-
+ 
     console.log(`✓ Generated: ${parsed.banderas_rojas.length} red flags, ${parsed.banderas_amarillas.length} yellow flags, ${parsed.tests.length} tests`);
     return res.json(parsed);
-
+ 
   } catch (err) {
     clearTimeout(timeout);
     if (err.name === "AbortError") return res.status(504).json({ error: "La IA tardó demasiado. Inténtalo de nuevo." });
@@ -189,12 +196,89 @@ REGLAS IMPORTANTES:
     return res.status(500).json({ error: "Error interno del servidor." });
   }
 });
-
+ 
+// ── POST /api/stripe/checkout ────────────────────────────────────────────────
+app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
+  if (!stripe) return res.status(500).json({ error: "Stripe no está configurado." });
+ 
+  const { priceId, email } = req.body;
+  if (!priceId) return res.status(400).json({ error: "El campo 'priceId' es requerido." });
+ 
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      payment_method_types: ["card"],
+      customer_email: email || undefined,
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: `${process.env.FRONTEND_URL || "https://fisioscript.com"}/exito.html?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL || "https://fisioscript.com"}/precios.html`,
+      locale: "es",
+      allow_promotion_codes: true,
+    });
+    return res.json({ url: session.url });
+  } catch (err) {
+    console.error("Stripe checkout error:", err.message);
+    return res.status(500).json({ error: "Error al crear la sesión de pago." });
+  }
+});
+ 
+// ── POST /api/stripe/webhook ─────────────────────────────────────────────────
+app.post("/api/stripe/webhook", async (req, res) => {
+  if (!stripe) return res.status(500).json({ error: "Stripe no está configurado." });
+ 
+  const sig = req.headers["stripe-signature"];
+  let event;
+ 
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    console.error("Webhook signature error:", err.message);
+    return res.status(400).send(`Webhook error: ${err.message}`);
+  }
+ 
+  console.log(`Stripe event: ${event.type}`);
+ 
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const session = event.data.object;
+      console.log(`✓ Pago completado — email: ${session.customer_email}, plan: ${session.metadata?.plan || "unknown"}`);
+      // TODO cuando tengas Supabase:
+      // await supabase.from("users").update({ plan: "individual", plan_expires_at: ... })
+      //   .eq("email", session.customer_email);
+      break;
+    }
+    case "customer.subscription.deleted": {
+      const sub = event.data.object;
+      console.log(`✗ Suscripción cancelada — customer: ${sub.customer}`);
+      // TODO: marcar usuario como inactivo en Supabase
+      break;
+    }
+    case "invoice.payment_failed": {
+      console.log(`⚠ Pago fallido — customer: ${event.data.object.customer}`);
+      // TODO: notificar al usuario
+      break;
+    }
+    default:
+      console.log(`Evento no manejado: ${event.type}`);
+  }
+ 
+  return res.json({ received: true });
+});
+ 
+// ── 404 + Error handlers ─────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: "Ruta no encontrada." }));
 app.use((err, req, res, next) => { console.error(err.message); res.status(500).json({ error: "Error interno." }); });
-
+ 
+// ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n✅  FisioScript API v2.0 en http://localhost:${PORT}`);
-  console.log(`   GROQ_API_KEY: ${process.env.GROQ_API_KEY ? "✓" : "✗ FALTA"}`);
-  console.log(`   Nuevos campos: banderas rojas/amarillas, hipótesis, tests clínicos\n`);
+  console.log(`   GROQ_API_KEY:         ${process.env.GROQ_API_KEY ? "✓" : "✗ FALTA"}`);
+  console.log(`   STRIPE_SECRET_KEY:    ${process.env.STRIPE_SECRET_KEY ? "✓" : "✗ no configurada"}`);
+  console.log(`   STRIPE_WEBHOOK_SECRET:${process.env.STRIPE_WEBHOOK_SECRET ? "✓" : "✗ no configurada"}`);
+  console.log(`   FRONTEND_URL:         ${process.env.FRONTEND_URL || "localhost (dev)"}\n`);
 });
+ 
