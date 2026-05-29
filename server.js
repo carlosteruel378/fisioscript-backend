@@ -323,12 +323,54 @@ app.post("/api/stripe/webhook", async (req, res) => {
   catch (err) { return res.status(400).send(`Webhook error: ${err.message}`); }
   console.log(`Stripe: ${event.type}`);
   switch (event.type) {
-    case "checkout.session.completed":
-      console.log(`✓ Pago completado: ${event.data.object.customer_email}`);
+    case "checkout.session.completed": {
+      const session = event.data.object;
+      const email = session.customer_email;
+      const priceId = session.line_items?.data?.[0]?.price?.id || '';
+
+      // Map price IDs to plan names
+      const planMap = {
+        'price_1TWFFrPOSeyVBgtaKHKpCA7T': 'individual_mensual',
+        'price_1TWFFrPOSeyVBgta0XkvT9EZ': 'individual_anual',
+        'price_1TWFFrPOSeyVBgtahQl9oQvJ': 'clinica_mensual',
+        'price_1TWFFtPOSeyVBgtaN7yiBmPT': 'clinica_anual',
+      };
+      const plan = planMap[priceId] || 'individual_mensual';
+
+      console.log(`✓ Pago completado: ${email} → ${plan}`);
+
+      // Update user metadata in Supabase via Admin API
+      if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
+        try {
+          // Find user by email
+          const usersRes = await fetch(
+            `${process.env.SUPABASE_URL}/auth/v1/admin/users?email=${encodeURIComponent(email)}`,
+            { headers: { 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` } }
+          );
+          const usersData = await usersRes.json();
+          const userId = usersData?.users?.[0]?.id;
+          if (userId) {
+            await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
+              method: 'PUT',
+              headers: {
+                'Content-Type': 'application/json',
+                'apikey': process.env.SUPABASE_SERVICE_KEY,
+                'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`
+              },
+              body: JSON.stringify({ user_metadata: { plan } })
+            });
+            console.log(`✓ Plan actualizado en Supabase: ${userId} → ${plan}`);
+          }
+        } catch(e) {
+          console.error('Error actualizando plan en Supabase:', e.message);
+        }
+      }
       break;
-    case "customer.subscription.deleted":
+    }
+    case "customer.subscription.deleted": {
       console.log(`✗ Suscripción cancelada: ${event.data.object.customer}`);
       break;
+    }
   }
   return res.json({ received: true });
 });
