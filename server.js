@@ -6,16 +6,18 @@ import "dotenv/config";
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ── Base de conocimiento clínico ─────────────────────────────────────────────
-const CLINICAL_DB = {"regions":{"hombro":"Hombro","cadera":"Cadera","lumbar":"Columna Lumbar","tobillo":"Tobillo","codo":"Codo","cervical":"Columna Cervical / Radiculopatía","rodilla":"Rodilla","cuadriceps":"Cuádriceps","aductor":"Aductor / Pubis / Ingle","isquiotibiales":"Isquiotibiales","gemelo":"Gemelo / Gastrocnemio"},"conditions":[{"id":"rct","n":"Rotura del Manguito Rotador","r":"hombro","p":["dolor con rotación externa","debilidad elevación","lag signs positivos"]},{"id":"sis","n":"Síndrome de Impingement Subacromial","r":"hombro","p":["dolor arco doloroso 60-120°","dolor anterosuperior","Neer/Hawkins positivos"]},{"id":"lhbt","n":"Tendinopatía Bíceps Largo (LHBT)","r":"hombro","p":["dolor anterior hombro","dolor surco bicipital","Speed/Yergason positivos"]},{"id":"subescapular","n":"Rotura Subescapular","r":"hombro","p":["debilidad rotación interna","IR lag sign positivo"]},{"id":"inestabilidad_gh","n":"Inestabilidad Glenohumeral","r":"hombro","p":["aprensión anterior","sensación inestabilidad","Apprehension test positivo"]},{"id":"fai","n":"Impingement Femoroacetabular (FAI)","r":"cadera","p":["dolor inguinal","↓ rotación interna","FADDIR positivo","dolor mecánico giro"]},{"id":"labrum_cadera","n":"Lesión Labrum Acetabular","r":"cadera","p":["dolor mecánico","click/chasquido","FADDIR positivo","catching/locking"]},{"id":"oa_cadera","n":"Osteoartritis de Cadera","r":"cadera","p":["rigidez","dolor IR","marcha alterada","limitación global ROM"]},{"id":"gtps","n":"Síndrome Dolor Trocantérico (GTPS)","r":"cadera","p":["dolor lateral cadera","Trendelenburg positivo","dolor palpación trocánter"]},{"id":"iliopsoas","n":"Tendinopatía/Lesión Iliopsoas","r":"cadera","p":["snapping anterior","dolor flexión resistida","palpación ASIS/AIIS dolorosa"]},{"id":"piriforme","n":"Síndrome Piriforme / Deep Gluteal","r":"cadera","p":["dolor glúteo profundo","dolor al sentarse","síntomas ciáticos"]},{"id":"radiculopatia_lumbar","n":"Radiculopatía Lumbar / Ciática","r":"lumbar","p":["dolor irradiado bajo rodilla","numbness dominante","déficit motor miotomal","SLR positivo"]},{"id":"disc_lumbar","n":"Patología Discal Lumbar","r":"lumbar","p":["dolor con flexión/sentado","lifting empeora","centralización/periferización McKenzie"]},{"id":"facetario_lumbar","n":"Dolor Facetario Lumbar","r":"lumbar","p":["dolor con extensión","dolor rotación","medial branch block positivo"]},{"id":"sij","n":"Disfunción Sacroiliaca (SIJ)","r":"lumbar","p":["FABER positivo","Fortin finger sign","cluster ≥3 tests positivos"]},{"id":"ces","n":"Síndrome Cauda Equina","r":"lumbar","p":["anestesia en silla de montar","retención urinaria","déficit motor progresivo"]},{"id":"esguince_atfl","n":"Esguince Lateral ATFL/CFL","r":"tobillo","p":["inversión traumática","dolor lateral","hematoma precoz","drawer positivo"]},{"id":"sindesmosis","n":"Lesión Sindesmosis (High Ankle Sprain)","r":"tobillo","p":["rotación externa trauma","dolor distal tibiofibular","squeeze positivo","marcha protectora"]},{"id":"deltoideo","n":"Esguince Deltoideo / Medial","r":"tobillo","p":["dolor medial","ER + valgus stress","medial clear space widening"]},{"id":"epicondilitis_lateral","n":"Epicondilitis Lateral (Tennis Elbow)","r":"codo","p":["dolor epicóndilo lateral","dolor extensión muñeca resistida","Cozen positivo"]},{"id":"epicondilitis_medial","n":"Epicondilitis Medial (Golfer's Elbow)","r":"codo","p":["dolor epicóndilo medial","dolor flexión/pronación resistida","Golfer test positivo"]},{"id":"cubital_tunnel","n":"Síndrome Túnel Cubital","r":"codo","p":["parestesias dedos 4-5","Tinel canal cubital positivo","debilidad mano"]},{"id":"plri","n":"Inestabilidad Rotatoria Posterolateral (PLRI)","r":"codo","p":["inestabilidad lateral","chair pushup test positivo","pivot shift positivo"]},{"id":"bursitis_olecraniana","n":"Bursitis Olecraniana","r":"codo","p":["tumefacción posterior visible","fluctuación","dolor posterior"]},{"id":"radiculopatia_cervical","n":"Radiculopatía Cervical","r":"cervical","p":["dolor irradiado brazo","parestesias","Spurling positivo","ULNT positivo"]},{"id":"menisco","n":"Rotura Meniscal","r":"rodilla","p":["dolor línea articular","click/bloqueo","Thessaly positivo"]},{"id":"lca","n":"Rotura LCA","r":"rodilla","p":["mecanismo trauma + pop","inestabilidad rotacional","Lachman positivo","pivot shift"]},{"id":"oa_rodilla","n":"Osteoartritis de Rodilla","r":"rodilla","p":["crepitación femorotibial","dolor con movimiento","rigidez","engrosamiento óseo"]},{"id":"pfj","n":"Síndrome Patelofemoral","r":"rodilla","p":["dolor anterior rodilla","lateral glide positivo","crepitación patelar"]},{"id":"rf_lesion","n":"Lesión Recto Femoral (Strain)","r":"cuadriceps","p":["dolor explosivo proximal","pop","dolor extensión resistida","dolor estiramiento pasivo"]},{"id":"rf_tendon_central","n":"Lesión Tendón Central Recto Femoral","r":"cuadriceps","p":["bullseye lesion en MRI","récuperación lenta","alto riesgo recidiva"]},{"id":"contusion_cuadriceps","n":"Contusión Cuádriceps","r":"cuadriceps","p":["golpe directo","limitación flexión rodilla","hematoma intramuscular"]},{"id":"myositis_ossificans","n":"Miositis Osificante (MO)","r":"cuadriceps","p":["inflamación persistente 2-3 semanas","pérdida progresiva ROM","contusión previa severa"]},{"id":"aductor_parcial","n":"Lesión Parcial Aductor Largo","r":"aductor","p":["dolor inguinal","dolor palpación origen aductor","squeeze positivo","dolor resistencia"]},{"id":"aductor_completo","n":"Rotura Completa Aductor","r":"aductor","p":["retracción tendinosa","hematoma significativo","déficit funcional marcado"]},{"id":"pubalgia","n":"Dolor Pubiano / Pubis Related Groin Pain","r":"aductor","p":["dolor palpación sínfisis","coexiste con dolor aductor","cambios degenerativos pubis en RM"]},{"id":"isquio_grado1","n":"Strain Isquiotibiales Grado I","r":"isquiotibiales","p":["dolor leve posterior muslo","sin déficit funcional importante"]},{"id":"isquio_grado2","n":"Strain Isquiotibiales Grado II","r":"isquiotibiales","p":["dolor moderado","déficit fuerza parcial","posible edema"]},{"id":"isquio_grado3","n":"Strain Isquiotibiales Grado III / Avulsión","r":"isquiotibiales","p":["dolor al sentarse","defecto palpable","hematoma severo","pérdida función marcada"]},{"id":"gemelo_leve","n":"Strain Gastrocnemio Medial Leve (Grado I)","r":"gemelo","p":["dolor posteromedial leve","puede caminar","hop test tolerable"]},{"id":"gemelo_moderado","n":"Strain Gastrocnemio Medial Moderado (Grado II)","r":"gemelo","p":["dolor marcha","déficit fuerza","edema/equimosis"]},{"id":"gemelo_severo","n":"Strain Gastrocnemio Medial Severo (Grado III)","r":"gemelo","p":["gap palpable","incapacidad funcional","gran hematoma"]},{"id":"soleo_lesion","n":"Lesión Sóleo","r":"gemelo","p":["dolor profundo posterolateral","sobreuso/running largo","dolor con rodilla flexionada"]}],"tests":[{"n":"External Rotation Lag Sign 90°","r":"hombro","s":"Infraspinoso / Supraespinoso","ro":"confirmar"},{"n":"Internal Rotation Lag Sign","r":"hombro","s":"Subescapular","ro":"confirmar"},{"n":"Drop Arm Test","r":"hombro","s":"Supraespinoso","ro":"apoyo"},{"n":"Jobe / Empty Can","r":"hombro","s":"Supraespinoso","ro":"apoyo"},{"n":"Bear Hug Test","r":"hombro","s":"Subescapular","ro":"apoyo"},{"n":"Lift-off Test","r":"hombro","s":"Subescapular inferior","ro":"apoyo"},{"n":"Neer Impingement Test","r":"hombro","s":"Espacio subacromial","se":0.72,"sp":0.66,"ro":"apoyo"},{"n":"Hawkins-Kennedy Test","r":"hombro","s":"Espacio subacromial","ro":"apoyo"},{"n":"Speed Test","r":"hombro","s":"Tendón bíceps largo","ro":"apoyo"},{"n":"Yergason Test","r":"hombro","s":"LHBT / Subescapular","ro":"apoyo"},{"n":"Apprehension Test Hombro","r":"hombro","s":"Cápsula anterior glenohumeral","ro":"confirmar"},{"n":"Relocation Test (Jobe)","r":"hombro","s":"Cápsula glenohumeral","ro":"confirmar"},{"n":"FADDIR (Flexión + ADD + IR)","r":"cadera","s":"Impingement anterosuperior / Labrum","ro":"confirmar"},{"n":"FABER Test","r":"cadera","s":"Intraarticular / SIJ / flexores","ro":"apoyo"},{"n":"Scour Test","r":"cadera","s":"Superficie acetabular","ro":"apoyo"},{"n":"Log Roll Test","r":"cadera","s":"Patología intraarticular pura","ro":"confirmar"},{"n":"Trendelenburg Test","r":"cadera","s":"Glúteo medio / abductores","ro":"confirmar"},{"n":"Thomas Test","r":"cadera","s":"Iliopsoas","ro":"apoyo"},{"n":"Deep Squat Test","r":"cadera","s":"FAI funcional","ro":"apoyo"},{"n":"SLR (Straight Leg Raise)","r":"lumbar","s":"Tensión radicular L4-S1","se":0.8,"sp":0.4,"ro":"descartar"},{"n":"Crossed SLR","r":"lumbar","s":"Hernia discal significativa","se":0.28,"sp":0.9,"ro":"confirmar"},{"n":"Slump Test","r":"lumbar","s":"Tensión neural global","ro":"apoyo"},{"n":"FABER (SIJ)","r":"lumbar","s":"Sacroiliaco","ro":"apoyo"},{"n":"Fortin Finger Sign","r":"lumbar","s":"SIJ","ro":"apoyo"},{"n":"Anterior Drawer Test Tobillo","r":"tobillo","s":"ATFL","ro":"confirmar"},{"n":"Anterolateral Drawer Test","r":"tobillo","s":"Inestabilidad rotatoria ATFL","ro":"confirmar"},{"n":"Inversion Stress / Talar Tilt","r":"tobillo","s":"CFL ± ATFL","ro":"confirmar"},{"n":"Ottawa Ankle Rules","r":"tobillo","s":"Hueso / fractura","se":0.99,"ro":"descartar"},{"n":"Squeeze Test (Sindesmosis)","r":"tobillo","s":"Sindesmosis tibiofibular","ro":"confirmar"},{"n":"External Rotation Test Tobillo","r":"tobillo","s":"Sindesmosis","ro":"confirmar"},{"n":"Cozen Test","r":"codo","s":"Epicóndilo lateral / ECRB","ro":"confirmar"},{"n":"Test de Golfer (Golfer's Elbow Test)","r":"codo","s":"Epicóndilo medial","ro":"confirmar"},{"n":"Tinel Canal Cubital","r":"codo","s":"Nervio cubital","ro":"apoyo"},{"n":"Valgus Stress Test Codo","r":"codo","s":"Ligamento colateral medial","ro":"apoyo"},{"n":"Chair Pushup Test","r":"codo","s":"PLRI","ro":"apoyo"},{"n":"Spurling Test","r":"cervical","s":"Raíz nerviosa cervical","se":0.6,"sp":0.94,"ro":"confirmar"},{"n":"ULNT1 (Mediano)","r":"cervical","s":"Nervio mediano / tensión neural","se":0.7,"sp":0.71,"ro":"apoyo"},{"n":"ULNT 4 Combinados (≥1 positivo)","r":"cervical","s":"Sensibilización neural global","se":0.97,"sp":0.51,"ro":"descartar"},{"n":"Shoulder Abduction Relief Test","r":"cervical","s":"Alivio radicular","se":0.49,"sp":0.76,"ro":"apoyo"},{"n":"Thessaly Test (20°)","r":"rodilla","s":"Menisco medial/lateral","ro":"apoyo"},{"n":"McMurray Test","r":"rodilla","s":"Menisco","ro":"apoyo"},{"n":"Lachman Test","r":"rodilla","s":"LCA","ro":"confirmar"},{"n":"Pivot Shift Test","r":"rodilla","s":"Inestabilidad rotacional LCA","ro":"confirmar"},{"n":"Lateral Glide Patelar","r":"rodilla","s":"Tracking patelar","ro":"apoyo"},{"n":"Dolor con extensión resistida (cuádriceps)","r":"cuadriceps","s":"Recto femoral / cuádriceps","ro":"apoyo"},{"n":"Resisted knee extension + hip flexion","r":"cuadriceps","s":"Recto femoral biarticular","ro":"confirmar"},{"n":"Flexión rodilla post-contusión","r":"cuadriceps","s":"Severidad contusión","ro":"confirmar"},{"n":"Squeeze Test 90°","r":"aductor","s":"Aductor relacionado","ro":"apoyo"},{"n":"Squeeze Test 0°","r":"aductor","s":"Aductor relacionado","ro":"apoyo"},{"n":"Resisted Adduction in Maximal Abduction","r":"aductor","s":"Aductor funcional","ro":"confirmar"},{"n":"Palpación origen adductor longus","r":"aductor","s":"Adductor longus proximal","ro":"confirmar"},{"n":"Bent-knee Stretch Test","r":"isquiotibiales","s":"Lesión proximal isquiotibiales","ro":"apoyo"},{"n":"Puranen-Orava Test","r":"isquiotibiales","s":"Tendinopatía/strain proximal","ro":"apoyo"},{"n":"Palpación dolorosa posterior muslo","r":"isquiotibiales","s":"Zona lesionada","ro":"apoyo"},{"n":"Dorsiflexión pasiva (rodilla extendida)","r":"gemelo","s":"Gastrocnemio / tensión muscular","ro":"confirmar"},{"n":"Heel Raise Rodilla Extendida","r":"gemelo","s":"Gastrocnemio","ro":"confirmar"},{"n":"Heel Raise Rodilla Flexionada","r":"gemelo","s":"Sóleo","ro":"confirmar"},{"n":"Thompson Test","r":"gemelo","s":"Tendón de Aquiles","ro":"confirmar"},{"n":"Single-leg Hop Test","r":"gemelo","s":"Función deportiva","ro":"apoyo"}],"red_flags":[{"n":"Anestesia en silla de montar","sug":"Síndrome Cauda Equina","urg":"emergencia","act":"Derivación urgente a urgencias hospitalarias"},{"n":"Retención urinaria aguda","sug":"Síndrome Cauda Equina","urg":"emergencia","act":"Derivación urgente a urgencias hospitalarias"},{"n":"Déficit motor progresivo","sug":"Compresión neural severa","urg":"urgente","act":"Derivación médica urgente"},{"n":"Fiebre + dolor lumbar","sug":"Infección espinal / Discitis","urg":"urgente","act":"Derivación médica"},{"n":"Cáncer previo + dolor nocturno + pérdida peso","sug":"Metástasis vertebral","urg":"urgente","act":"Derivación oncológica / médica urgente"},{"n":"Trauma + osteoporosis + edad avanzada","sug":"Fractura vertebral","urg":"urgente","act":"Radiografía urgente"},{"n":"Incapacidad absoluta de carga + Ottawa +","sug":"Fractura significativa","urg":"urgente","act":"Radiografía urgente (Ottawa Rules)"},{"n":"Dolor proximal peroné post-trauma tobillo","sug":"Fractura Maisonneuve","urg":"urgente","act":"Radiografía tibia-peroné completa"},{"n":"Bursitis + fiebre","sug":"Bursitis séptica","urg":"urgente","act":"Derivación médica urgente / antibioterapia"},{"n":"Hinchazón aguda post-trauma + deformidad","sug":"Luxación / fractura codo","urg":"emergencia","act":"Urgencias"},{"n":"Edema difuso + cordón + signos vasculares","sug":"TVP (Trombosis Venosa Profunda)","urg":"emergencia","act":"Derivación urgente a medicina interna / urgencias"},{"n":"Dolor desproporcionado + tensión compartimento","sug":"Síndrome compartimental","urg":"emergencia","act":"Urgencias quirúrgicas"},{"n":"Thompson positivo + pérdida plantarflexión","sug":"Rotura tendón Aquiles","urg":"urgente","act":"Derivación cirugía ortopédica"}],"recovery":{"esguince_atfl":[{"g":"grado_1","min":7,"max":14,"l":"1-2 semanas"},{"g":"grado_2","min":21,"max":42,"l":"3-6 semanas"},{"g":"grado_3","min":42,"max":84,"l":"6-12 semanas"}],"gemelo_leve":[{"g":"grado_1","min":7,"max":14,"l":"1-2 semanas"}],"gemelo_moderado":[{"g":"grado_2","min":14,"max":42,"l":"2-6 semanas"}],"gemelo_severo":[{"g":"grado_3","min":42,"max":120,"l":"6 semanas - 4 meses"}],"isquio_grado1":[{"g":"grado_1","min":7,"max":21,"l":"1-3 semanas"}],"isquio_grado2":[{"g":"grado_2","min":21,"max":56,"l":"3-8 semanas"}],"isquio_grado3":[{"g":"grado_3","min":60,"max":120,"l":"2-4 meses"},{"g":"avulsion","min":120,"max":200,"l":"4-7 meses"}],"rf_lesion":[{"g":"miofascial","min":14,"max":21,"l":"2-3 semanas"},{"g":"periférica","min":7,"max":12,"l":"~9 días"}],"rf_tendon_central":[{"g":"tendon_central","min":27,"max":35,"l":"27-35 días (mínimo)"},{"g":"tenodesis","min":84,"max":90,"l":"~12 semanas"}],"aductor_parcial":[{"g":"parcial","min":7,"max":48,"l":"1-7 semanas"}],"aductor_completo":[{"g":"completo","min":60,"max":65,"l":"~8-9 semanas"},{"g":"completo","min":90,"max":100,"l":"~14 semanas"}]},"rtp":{"isquio_grado1":["Marcha sin dolor","Fuerza ≥90% lado sano","Sprint sin síntomas"],"isquio_grado2":["Marcha sin dolor","Fuerza ≥90% lado sano","ROM bilateral simétrico","Tolerancia ejercicios excéntricos"],"isquio_grado3":["Fuerza ≥90% lado sano","Sprint sin síntomas","Ratio H/Q 50-60%"],"gemelo_leve":["Caminar sin cojera","15 heel raises tolerables"],"gemelo_moderado":["Heel raises simétricos","Running sin cojera","Fuerza <10% asimetría"],"gemelo_severo":["Hopping normal bilateral","Sprint y cambio dirección tolerados","Confianza psicológica adecuada"],"aductor_parcial":["Squeeze test sin dolor","Sprint y cambio dirección sin dolor"],"rf_lesion":["ROM completo","Fuerza casi simétrica","Sprint/kick sin dolor"]}};
+// ═══════════════════════════════════════════════════════════════════════════
+// BASE DE CONOCIMIENTO CLÍNICO FISIOSCRIPT v3.0 (13 regiones, 34 patologías)
+// ═══════════════════════════════════════════════════════════════════════════
+const CLINICAL_KB = {"regions":{"hombro":"Hombro","cadera":"Cadera","lumbar":"Columna Lumbar","toracico":"Columna Torácica / Espalda Alta","tobillo":"Tobillo","codo":"Codo","cervical":"Columna Cervical / Radiculopatía","rodilla":"Rodilla","rodilla_akp":"Dolor Anterior de Rodilla (AKP/Patelofemoral)","cuadriceps":"Cuádriceps","aductor":"Aductor / Ingle","isquiotibiales":"Isquiotibiales","gemelo":"Gemelo / Pantorrilla"},"conditions":[{"id":"rct_manguito","r":"hombro","n":"Rotura Manguito Rotador","p":["dolor hombro con movimiento","debilidad rotación","dolor nocturno","incapacidad elevación"],"rts_days":[90,180],"tratamiento":"Fisioterapia progresiva: rotadores + escapular. Cirugía si rotura completa atleta élite."},{"id":"sis_impingement","r":"hombro","n":"Síndrome Subacromial (SIS)","p":["dolor arco 60-120°","dolor con elevación","dolor nocturno leve","sin deficit fuerza significativo"],"rts_days":[30,90],"tratamiento":"Ejercicio terapéutico, corrección postura escapular, evitar compresión. Manual therapy."},{"id":"inestabilidad_gh","r":"hombro","n":"Inestabilidad Glenohumeral","p":["sensación luxación","apprehension","dolor joven deportista","trauma previo"],"rts_days":[90,270],"tratamiento":"Estabilizadores dinámicos. Cirugía si recidivante."},{"id":"tendinopatia_biceps","r":"hombro","n":"Tendinopatía Bíceps (LHBT)","p":["dolor anterior hombro","dolor surco bicipital","chasquido","dolor flexión codo resistida"],"rts_days":[30,60],"tratamiento":"Excéntricos bíceps, evitar carga end-range. Infiltración si crónico."},{"id":"fai_labrum","r":"cadera","n":"FAI / Lesión Labrum","p":["dolor inguinal","dolor con flexión cadera","limitación rotación interna","dolor salida coche/sentarse"],"rts_days":[60,120],"tratamiento":"Control motor cadera-core. Artroscopia si fallo conservador >6 meses."},{"id":"gtps_gluteo","r":"cadera","n":"Tendinopatía Glúteo / GTPS","p":["dolor lateral cadera","dolor trocánter mayor","Trendelenburg","empeora cruce piernas"],"rts_days":[60,120],"tratamiento":"Carga progresiva glúteo medio, evitar compresión. Sin estiramiento precoz."},{"id":"oa_cadera","r":"cadera","n":"Osteoartritis de Cadera","p":["rigidez matutina","dolor IR y flexión","marcha antálgica","limitación ROM global"],"rts_days":[null,null],"tratamiento":"Ejercicio aeróbico + fuerza. Pérdida peso. Artroplastia si incapacitante."},{"id":"radiculopatia_lumbar","r":"lumbar","n":"Radiculopatía Lumbar","p":["dolor irradiado pierna","parestesias","SLR positivo","déficit neurológico"],"rts_days":[30,90],"tratamiento":"Neurodinamia, control motor, educación dolor. Epidural si severo. Cirugía si CES."},{"id":"dolor_lumbar_mecanico","r":"lumbar","n":"Dolor Lumbar Mecánico","p":["dolor lumbar posicional","sin irradiación","centralización McKenzie","mejora movimiento"],"rts_days":[14,42],"tratamiento":"Ejercicio activo, McKenzie si centralización. Manipulación en agudo. Evitar reposo."},{"id":"sij_sacroiliaco","r":"lumbar","n":"Disfunción Sacroiliaca","p":["dolor zona SIJ","Fortin sign","dolor glúteo","cluster 3 tests positivos"],"rts_days":[21,60],"tratamiento":"Manipulación SIJ, estabilización cintura pélvica, ejercicio."},{"id":"dolor_toracico_mecanico","r":"toracico","n":"Dolor Torácico Mecánico / UBP","p":["dolor entre escápulas","dolor T1-T5","empeora sedestación","relación cuello-hombro","rigidez torácica"],"rts_days":[14,42],"tratamiento":"Movilización torácica, ejercicio fuerza escapular, educación postural. Enfoque multimodal."},{"id":"disfuncion_costovertebral","r":"toracico","n":"Disfunción Costovertebral","p":["dolor localizado costilla","dolor inspiración","dolor unilateral espalda alta","reproducible palpación"],"rts_days":[7,21],"tratamiento":"Movilización costal, respiración, HVLA si indicado."},{"id":"esguince_lateral","r":"tobillo","n":"Esguince Lateral (ATFL/CFL)","p":["inversión traumática","dolor lateral","hematoma precoz","incapacidad carga"],"rts_days":[7,84],"tratamiento":"POLICE agudo. Propiocepción precoz. Fuerza peroneos. Progresión funcional."},{"id":"sindesmosis","r":"tobillo","n":"Lesión Sindesmosis","p":["rotación externa traumática","dolor distal tibiofibular","squeeze positivo","recuperación lenta"],"rts_days":[42,120],"tratamiento":"Protección carga, control edema. Cirugía si diástasis. Rehab lenta y progresiva."},{"id":"rotura_aquiles","r":"tobillo","n":"Rotura Tendón Aquiles","p":["pop súbito","Thompson positivo","pérdida plantarflexión","incapacidad carga"],"rts_days":[180,365],"tratamiento":"Ortesis funcional vs cirugía. Excéntricos fase tardía. RTS lento."},{"id":"epicondilitis_lateral","r":"codo","n":"Epicondilitis Lateral (Tennis Elbow)","p":["dolor epicóndilo lateral","Cozen positivo","dolor extensión muñeca resistida","actividad repetitiva"],"rts_days":[30,90],"tratamiento":"Excéntricos ECRB, corrección técnica, ortesis. Ondas de choque si crónico."},{"id":"epicondilitis_medial","r":"codo","n":"Epicondilitis Medial (Golfer Elbow)","p":["dolor epicóndilo medial","golfer test positivo","dolor pronación resistida","posible parestesias"],"rts_days":[30,90],"tratamiento":"Excéntricos flexores, corrección técnica. Valorar nervio cubital."},{"id":"neuropatia_cubital","r":"codo","n":"Neuropatía Cubital","p":["parestesias 4-5 dedo","Tinel cubital positivo","debilidad intrínseca mano","dolor medial codo"],"rts_days":[30,90],"tratamiento":"Almohada nocturna, ejercicios deslizamiento neural. Cirugía si severo."},{"id":"radiculopatia_cervical","r":"cervical","n":"Radiculopatía Cervical","p":["dolor irradiado brazo","Spurling positivo","parestesias dermatoma","debilidad miotomal"],"rts_days":[30,90],"tratamiento":"Neurodinamia ULNT, tracción manual, collar si agudo. Cirugía si déficit motor."},{"id":"cervicalgia_mecanica","r":"cervical","n":"Cervicalgia Mecánica","p":["dolor cuello localizado","limitación ROM cervical","dolor postural","sin irradiación"],"rts_days":[14,42],"tratamiento":"Movilización cervical, ejercicio control motor, educación postural."},{"id":"menisco","r":"rodilla","n":"Lesión Meniscal","p":["dolor línea articular","Thessaly positivo","catching/locking","dolor con carga rotacional"],"rts_days":[42,180],"tratamiento":"Ejercicio fuerza cuádriceps-isquios. Artroscopia si bloqueo o fallo conservador."},{"id":"lca","r":"rodilla","n":"Rotura LCA","p":["trauma rotacional","giving way","derrame rápido","Lachman positivo","pivot shift"],"rts_days":[240,365],"tratamiento":"Reconstrucción LCA + rehabilitación 9-12 meses. Fuerza + neuromusuclar + confianza."},{"id":"oa_rodilla","r":"rodilla","n":"Osteoartritis de Rodilla","p":["dolor mecánico rodilla","crepitación","rigidez matutina <30min","limitación ROM"],"rts_days":[null,null],"tratamiento":"Ejercicio, pérdida peso, órtesis. Infiltración si dolor agudo. Prótesis si incapacitante."},{"id":"akp_patelofemoral","r":"rodilla_akp","n":"Dolor Patelofemoral (AKP)","p":["dolor anterior rodilla","dolor escaleras/sentadilla","movie theater sign","maltracking","debilidad cadera"],"rts_days":[42,120],"tratamiento":"Fuerza glúteo+cuádriceps, corrección biomecánica, taping McConnell. Control dinámico."},{"id":"tendinopatia_patelar","r":"rodilla_akp","n":"Tendinopatía Patelar (Jumper's Knee)","p":["dolor polo inferior patela","decline squat positivo","dolor carga excéntrica","deportes de salto"],"rts_days":[90,180],"tratamiento":"Heavy slow resistance excéntrico, decline squat. US confirma. Sin infiltración local."},{"id":"hoffa_fatpad","r":"rodilla_akp","n":"Síndrome Hoffa (Fat Pad)","p":["dolor infrapatelar profundo","dolor extensión terminal","burning infrapatelar","maltracking asociado"],"rts_days":[30,90],"tratamiento":"Evitar extensión completa, taping patelar, control inflamación. MRI si duda."},{"id":"plica_medial","r":"rodilla_akp","n":"Síndrome de Plica","p":["clicking/catching rodilla","dolor flex-ext repetida","Stutter test positivo","confundible menisco"],"rts_days":[30,60],"tratamiento":"Anti-inflamatorios, ejercicio suave, artroscopia si refractario."},{"id":"strain_cuadriceps","r":"cuadriceps","n":"Lesión Cuádriceps / Recto Femoral","p":["dolor explosivo muslo","pop sprint/kick","dolor extensión resistida","gap palpable"],"rts_days":[14,84],"tratamiento":"POLICE agudo, flexión 120° contusión. Excéntricos fase tardía. MRI si tendón central."},{"id":"contusion_cuadriceps","r":"cuadriceps","n":"Contusión Cuádriceps","p":["golpe directo muslo","hematoma","limitación flexión","dolor palpación"],"rts_days":[7,42],"tratamiento":"Flexión inmediata 120°, hielo, compresión. Vigilar miositis osificante."},{"id":"strain_aductor","r":"aductor","n":"Lesión Aductor / Pubalgia","p":["dolor inguinal","dolor adducción resistida","squeeze test positivo","dolor sprint/cambio dirección"],"rts_days":[7,100],"tratamiento":"Progresión carga aductores, Copenhagen adduction. Cirugía si retracción completa."},{"id":"strain_isquios","r":"isquiotibiales","n":"Lesión Isquiotibiales","p":["dolor posterior muslo sprint","sensación tirón","marcha rígida","equimosis posterior"],"rts_days":[14,84],"tratamiento":"Excéntricos elongación (Nordic hamstring). Control lumbo-pélvico. NO volver precoz."},{"id":"avulsion_isquios","r":"isquiotibiales","n":"Avulsión Proximal Isquiotibiales","p":["dolor al sentarse","dolor glúteo profundo","retracción","trauma grave"],"rts_days":[90,270],"tratamiento":"Cirugía si >2 tendones o >2cm retracción. Rehab larga."},{"id":"strain_gemelo","r":"gemelo","n":"Lesión Gemelo Medial (Tennis Leg)","p":["pop súbito pantorrilla","dolor posteromedial","dorsiflexión dolorosa","incapacidad heel raise"],"rts_days":[14,84],"tratamiento":"POLICE, compresión. Heel raises progresivos. Excéntricos fase 3. NO estirar precoz."},{"id":"rotura_aquiles_parcial","r":"gemelo","n":"Tendinopatía / Lesión Aquiles","p":["dolor tendón aquiles","dolor matutino","dolor carga excéntrica","engrosamiento palpable"],"rts_days":[60,180],"tratamiento":"Excéntricos Alfredson/Silbernagel. Ondas de choque. Ortesis si agudo."}],"tests_by_region":{"hombro":[{"id":"er_lag","n":"External Rotation Lag Sign (90°)","s":"Infraspinoso/Supraespinoso","se":null,"sp":null,"role":"confirmar","dor":12.7},{"id":"ir_lag","n":"Internal Rotation Lag Sign","s":"Subescapular","se":null,"sp":null,"role":"confirmar","dor":7.0},{"id":"drop_arm","n":"Drop Arm Test","s":"Supraespinoso","se":0.21,"sp":0.92,"role":"confirmar"},{"id":"jobe","n":"Jobe / Empty Can","s":"Supraespinoso","se":0.59,"sp":0.67,"role":"apoyo"},{"id":"neer","n":"Neer Impingement Sign","s":"Espacio subacromial","se":0.72,"sp":0.6,"role":"descartar"},{"id":"hawkins","n":"Hawkins-Kennedy","s":"Espacio subacromial","se":0.79,"sp":0.59,"role":"descartar"},{"id":"speed","n":"Speed Test","s":"LHBT bíceps","se":0.32,"sp":0.75,"role":"apoyo"},{"id":"yergason","n":"Yergason Test","s":"LHBT / corredera bicipital","se":0.37,"sp":0.86,"role":"apoyo"},{"id":"apprehension_gh","n":"Apprehension Test","s":"Cápsula anterior / Labrum","se":0.72,"sp":0.6,"role":"apoyo"},{"id":"belly_press","n":"Belly Press Test","s":"Subescapular superior","se":0.4,"sp":0.98,"role":"confirmar"},{"id":"bear_hug","n":"Bear Hug Test","s":"Subescapular porciones superiores","se":0.6,"sp":0.92,"role":"confirmar"}],"cadera":[{"id":"faddir","n":"FADDIR","s":"FAI / Labrum anterosuperior","se":0.96,"sp":0.1,"role":"descartar"},{"id":"faber_cadera","n":"FABER Test","s":"Intraarticular / SIJ","se":0.88,"sp":0.64,"role":"apoyo"},{"id":"log_roll","n":"Log Roll Test","s":"Patología intraarticular pura","se":0.43,"sp":0.93,"role":"confirmar"},{"id":"trendelenburg","n":"Trendelenburg Test","s":"Glúteo medio","se":0.55,"sp":0.7,"role":"apoyo"},{"id":"scour","n":"Scour Test","s":"Superficie acetabular","se":null,"sp":null,"role":"apoyo"},{"id":"thomas_cadera","n":"Thomas Test","s":"Iliopsoas / flexores","se":null,"sp":null,"role":"apoyo"},{"id":"ober","n":"Ober Test","s":"TFL / Cintilla IT","se":null,"sp":null,"role":"apoyo"}],"lumbar":[{"id":"slr","n":"SLR (Straight Leg Raise)","s":"Tensión radicular L4-S1","se":0.91,"sp":0.26,"role":"descartar"},{"id":"crossed_slr","n":"Crossed SLR","s":"Hernia discal significativa","se":0.29,"sp":0.88,"role":"confirmar"},{"id":"slump","n":"Slump Test","s":"Tensión neural global","se":0.84,"sp":0.83,"role":"apoyo"},{"id":"faber_sij","n":"FABER (SIJ)","s":"Articulación sacroiliaca","se":null,"sp":null,"role":"apoyo"},{"id":"gaenslen","n":"Gaenslen Test","s":"Articulación sacroiliaca","se":null,"sp":null,"role":"apoyo"}],"toracico":[{"id":"palpacion_toracica","n":"Palpación segmental torácica","s":"Disfunción costovertebral / facetaria","se":null,"sp":null,"role":"apoyo"},{"id":"movimiento_toracico","n":"ROM torácico (flexión/extensión/rotación)","s":"Rigidez segmental torácica","se":null,"sp":null,"role":"apoyo"},{"id":"palpacion_costal","n":"Palpación costovertebral","s":"Disfunción costal","se":null,"sp":null,"role":"apoyo"},{"id":"spring_test","n":"Spring Test (PA pressure)","s":"Rigidez segmental torácica","se":null,"sp":null,"role":"apoyo"},{"id":"control_escapular","n":"Test control escapular","s":"Disfunción escapulotorácica","se":null,"sp":null,"role":"apoyo"}],"tobillo":[{"id":"anterior_drawer_tobillo","n":"Anterior Drawer Test","s":"ATFL","se":0.74,"sp":0.88,"role":"confirmar"},{"id":"talar_tilt","n":"Talar Tilt / Inversion Stress","s":"CFL ± ATFL","se":0.5,"sp":0.88,"role":"apoyo"},{"id":"ottawa_ankle","n":"Ottawa Ankle Rules","s":"Fractura / hueso","se":0.99,"sp":null,"role":"descartar"},{"id":"squeeze_tobillo","n":"Squeeze Test Tobillo","s":"Sindesmosis","se":0.3,"sp":0.93,"role":"confirmar"},{"id":"external_rotation_stress","n":"External Rotation Stress Test","s":"Sindesmosis","se":0.71,"sp":0.63,"role":"apoyo"},{"id":"thompson","n":"Thompson Test","s":"Tendón de Aquiles","se":0.96,"sp":0.93,"role":"confirmar"}],"codo":[{"id":"cozen","n":"Cozen Test","s":"Epicóndilo lateral / ECRB","se":0.84,"sp":0.74,"role":"apoyo"},{"id":"golfer_test","n":"Test de Golfer","s":"Epicóndilo medial","se":null,"sp":null,"role":"apoyo"},{"id":"tinel_cubital","n":"Tinel Canal Cubital","s":"Nervio cubital","se":0.7,"sp":0.98,"role":"confirmar"},{"id":"valgus_stress_codo","n":"Valgus Stress Test Codo","s":"Ligamento colateral medial","se":null,"sp":null,"role":"apoyo"},{"id":"chair_pushup","n":"Chair Push-up Test","s":"Inestabilidad PLRI","se":0.88,"sp":null,"role":"confirmar"}],"cervical":[{"id":"spurling","n":"Spurling Test","s":"Raíz nerviosa cervical","se":0.5,"sp":0.86,"role":"confirmar"},{"id":"ulnt1","n":"ULNT1 (Mediano)","s":"Nervio mediano / tensión neural","se":0.7,"sp":0.71,"role":"apoyo"},{"id":"ulnt_combinados","n":"ULNT Combinados (≥1 positivo)","s":"Sensibilización neural global","se":0.97,"sp":0.51,"role":"descartar"},{"id":"shoulder_abduction_relief","n":"Shoulder Abduction Relief Test","s":"Alivio radicular cervical","se":0.49,"sp":0.76,"role":"apoyo"}],"rodilla":[{"id":"thessaly","n":"Thessaly Test (20°)","s":"Menisco medial/lateral","se":0.66,"sp":0.53,"role":"apoyo"},{"id":"mcmurray","n":"McMurray Test","s":"Menisco","se":0.55,"sp":0.77,"role":"apoyo"},{"id":"lachman","n":"Lachman Test","s":"LCA","se":0.85,"sp":0.94,"role":"confirmar"},{"id":"pivot_shift","n":"Pivot Shift Test","s":"Inestabilidad rotacional LCA","se":0.42,"sp":0.98,"role":"confirmar"},{"id":"anterior_drawer_rodilla","n":"Anterior Drawer Rodilla","s":"LCA","se":0.62,"sp":0.88,"role":"apoyo"}],"rodilla_akp":[{"id":"clarke_grind","n":"Patellar Grind Test (Clarke)","s":"Articulación patelofemoral","se":null,"sp":null,"role":"apoyo"},{"id":"patellar_apprehension","n":"Patellar Apprehension Test","s":"Inestabilidad patelar / MPFL","se":0.72,"sp":0.6,"role":"apoyo"},{"id":"lateral_glide","n":"Lateral Glide Test","s":"Hipermovilidad patelar / MPFL","se":null,"sp":null,"role":"apoyo"},{"id":"patellar_tilt","n":"Patellar Tilt Test","s":"Retináculo lateral","se":null,"sp":null,"role":"apoyo"},{"id":"j_sign","n":"J-Sign","s":"Maltracking patelar / displasia","se":null,"sp":null,"role":"apoyo"},{"id":"single_leg_squat","n":"Single-Leg Squat","s":"Control dinámico patelofemoral","se":null,"sp":null,"role":"apoyo"},{"id":"step_down","n":"Step-Down Test","s":"Control femoropatelar","se":null,"sp":null,"role":"apoyo"},{"id":"decline_squat","n":"Decline Squat Test","s":"Tendón rotuliano (tendinopatía patelar)","se":null,"sp":null,"role":"apoyo"},{"id":"hoffa_test","n":"Hoffa Test","s":"Fat pad infrapatelar","se":null,"sp":null,"role":"apoyo"},{"id":"stutter_test","n":"Stutter Test","s":"Plica medial","se":null,"sp":null,"role":"apoyo"}],"cuadriceps":[{"id":"ext_resistida_cuad","n":"Extensión resistida cuádriceps","s":"Recto femoral / cuádriceps","se":null,"sp":null,"role":"apoyo"},{"id":"resisted_knee_hip","n":"Extensión rodilla + flexión cadera resistida","s":"Recto femoral biarticular","se":null,"sp":null,"role":"apoyo"},{"id":"palpacion_gap_cuad","n":"Palpación gap muscular cuádriceps","s":"Rotura parcial/completa","se":null,"sp":null,"role":"confirmar"},{"id":"flexion_rodilla_cuad","n":"Flexión rodilla post-contusión","s":"Severidad contusión","se":null,"sp":null,"role":"apoyo"}],"aductor":[{"id":"squeeze_90","n":"Squeeze Test 90°","s":"Aductor relacionado","se":0.56,"sp":0.79,"role":"apoyo"},{"id":"squeeze_0","n":"Squeeze Test 0°","s":"Aductor relacionado","se":0.45,"sp":0.9,"role":"apoyo"},{"id":"resist_add_max_abd","n":"Resisted Adduction in Maximal Abduction","s":"Dolor aductor funcional","se":null,"sp":null,"role":"apoyo"},{"id":"palp_origen_aductor","n":"Palpación origen aductor longus","s":"Adductor longus proximal","se":null,"sp":null,"role":"apoyo"}],"isquiotibiales":[{"id":"bent_knee_stretch","n":"Bent-knee Stretch Test","s":"Lesión proximal isquiotibiales","se":0.84,"sp":0.83,"role":"apoyo"},{"id":"puranen_orava","n":"Puranen-Orava Test","s":"Tendinopatía/strain proximal","se":0.76,"sp":null,"role":"apoyo"},{"id":"palp_posterior_muslo","n":"Palpación posterior muslo","s":"Zona lesionada isquiotibiales","se":null,"sp":null,"role":"apoyo"},{"id":"slr_hamstring","n":"SLR con evaluación isquiotibiales","s":"Tensión neural vs muscular","se":null,"sp":null,"role":"apoyo"}],"gemelo":[{"id":"dorsiflexion_pasiva","n":"Dorsiflexión pasiva (rodilla extendida)","s":"Gastrocnemio / tensión","se":null,"sp":null,"role":"apoyo"},{"id":"heel_raise_ext","n":"Heel Raise Rodilla Extendida","s":"Gastrocnemio","se":null,"sp":null,"role":"apoyo"},{"id":"heel_raise_flex","n":"Heel Raise Rodilla Flexionada","s":"Sóleo","se":null,"sp":null,"role":"apoyo"},{"id":"thompson_gemelo","n":"Thompson Test","s":"Tendón de Aquiles","se":0.96,"sp":0.93,"role":"confirmar"},{"id":"palp_gemelo","n":"Palpación musculatura posterior pantorrilla","s":"Gastrocnemio medial/lateral","se":null,"sp":null,"role":"apoyo"}]},"region_keywords":{"hombro":["hombro","glenohumeral","manguito","subacromial","bíceps","escapular","rotador","deltoides"],"cadera":["cadera","coxofemoral","acetabular","labrum","trocánter","inguinal","fai","iliopsoas","piriforme","glúteo"],"lumbar":["lumbar","lumbalgia","ciática","discal","sacroiliaca","sij","facetario","cauda equina","l1","l2","l3","l4","l5","s1"],"toracico":["torácico","toracico","dorsal","espalda alta","escapula","escápula","t1","t2","t3","t4","t5","costilla","costovertebral","cifosis"],"tobillo":["tobillo","esguince","atfl","cfl","sindesmosis","peroné","maléolo","aquiles"],"codo":["codo","epicóndilo","epicondilitis","tennis elbow","olécranon","cubital","humeral"],"cervical":["cervical","cervicalgia","cuello","radiculopatía cervical","braquialgia","c3","c4","c5","c6","c7"],"rodilla_akp":["rótula","patelofemoral","patelar","akp","dolor anterior rodilla","plica","hoffa","maltracking","jumper"],"rodilla":["rodilla","menisco","lca","ligamento cruzado","tibia","fémur distal","crepitación rodilla"],"cuadriceps":["cuádriceps","recto femoral","cuadriceps","muslo anterior","contusión muslo"],"aductor":["aductor","ingle","pubis","pubalgia","sínfisis","groin"],"isquiotibiales":["isquiotibiales","isquio","semimembranoso","semitendinoso","bíceps femoral","muslo posterior"],"gemelo":["gemelo","gastrocnemio","pantorrilla","sóleo","aquiles","tennis leg"]},"red_flags":[{"n":"Anestesia en silla de montar","sug":"Síndrome Cauda Equina (CES)","urg":"emergencia","act":"Derivación urgente neurociugía"},{"n":"Retención urinaria aguda","sug":"Síndrome Cauda Equina (CES)","urg":"emergencia","act":"Urgencias hospitalarias inmediatas"},{"n":"Déficit motor progresivo","sug":"Compresión neural severa","urg":"urgente","act":"Derivación neurología/neurocirugía"},{"n":"Fiebre + dolor lumbar","sug":"Infección espinal (espondilodiscitis)","urg":"urgente","act":"Analítica urgente, derivación médico"},{"n":"Pérdida peso inexplicada + dolor","sug":"Posible malignidad vertebral","urg":"urgente","act":"Derivación oncología/médico"},{"n":"Dolor nocturno severo que no cede","sug":"Patología sistémica/maligna","urg":"urgente","act":"Derivación médico"},{"n":"Trauma + osteoporosis + dolor agudo","sug":"Fractura vertebral","urg":"urgente","act":"Radiografía urgente"},{"n":"Hinchazón aguda post-trauma articular","sug":"Fractura/luxación","urg":"urgente","act":"Radiografía urgente, inmovilización"},{"n":"Fiebre + bursitis o articulación caliente","sug":"Artritis séptica / bursitis séptica","urg":"emergencia","act":"Urgencias, antibióticos"},{"n":"Edema difuso pantorrilla sin trauma","sug":"TVP (Trombosis Venosa Profunda)","urg":"urgente","act":"Eco-doppler urgente, derivación médico"},{"n":"Dolor pecho + disnea","sug":"Patología cardiopulmonar","urg":"emergencia","act":"Urgencias inmediatas, ECG"},{"n":"Déficit neurológico agudo miembro superior","sug":"Mielopatía cervical / ACV","urg":"emergencia","act":"Urgencias neurológicas"},{"n":"Deformidad visible post-trauma","sug":"Luxación / fractura","urg":"urgente","act":"Inmovilización y urgencias"},{"n":"Síntomas bilaterales MMII progresivos","sug":"Mielopatía / Cauda Equina","urg":"emergencia","act":"Neuroimagen urgente"}]};
 
-// Precompute useful lookups
+// Lookups precompilados
 const conditionMap = {};
-CLINICAL_DB.conditions.forEach(c => { conditionMap[c.id] = c; });
+CLINICAL_KB.conditions.forEach(c => { conditionMap[c.id] = c; });
+
 const testsByRegion = {};
-CLINICAL_DB.tests.forEach(t => {
-  if (!testsByRegion[t.r]) testsByRegion[t.r] = [];
-  testsByRegion[t.r].push(t);
+Object.entries(CLINICAL_KB.tests_by_region).forEach(([rid, tests]) => {
+  testsByRegion[rid] = tests;
 });
 
 // ── Stripe ───────────────────────────────────────────────────────────────────
@@ -33,7 +35,7 @@ function rateLimit(maxReqs, windowMs) {
   };
 }
 
-// ── Security + CORS ──────────────────────────────────────────────────────────
+// ── CORS + Security ──────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
@@ -62,137 +64,146 @@ app.use((req, res, next) => {
 // ── Health check ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({
   status: "ok", service: "FisioScript API v3.0",
-  clinical_db: { conditions: CLINICAL_DB.conditions.length, tests: CLINICAL_DB.tests.length, red_flags: CLINICAL_DB.red_flags.length },
+  clinical_kb: {
+    regions: Object.keys(CLINICAL_KB.regions).length,
+    conditions: CLINICAL_KB.conditions.length,
+    red_flags: CLINICAL_KB.red_flags.length,
+  }
 }));
 
-// ── Build clinical context for prompt ────────────────────────────────────────
+// ── Build clinical context string ─────────────────────────────────────────────
 function buildClinicalContext() {
-  const regions = Object.entries(CLINICAL_DB.regions).map(([id, name]) => `${id}: ${name}`).join(', ');
-  const conditions = CLINICAL_DB.conditions.map(c => `[${c.id}] ${c.n} (${c.r}) → patrones: ${(c.p||[]).join('; ')}`).join('\n');
-  const tests = CLINICAL_DB.tests.map(t => {
-    let s = `${t.n} (${t.r}) → ${t.s}`;
-    if (t.se) s += ` | Sens:${t.se}`;
-    if (t.sp) s += ` Spec:${t.sp}`;
-    if (t.ro) s += ` | ${t.ro}`;
-    return s;
-  }).join('\n');
-  const redFlags = CLINICAL_DB.red_flags.map(r => `${r.n} → ${r.sug} (${r.urg}) → ${r.act}`).join('\n');
-  const recovery = Object.entries(CLINICAL_DB.recovery).map(([cid, rts]) => {
-    const cond = conditionMap[cid];
-    return `${cond ? cond.n : cid}: ${rts.map(r => `${r.g||''}:${r.min}-${r.max}d(${r.l})`).join(', ')}`;
+  const regiones = Object.entries(CLINICAL_KB.regions).map(([id, n]) => `${id}:${n}`).join(', ');
+
+  const condiciones = CLINICAL_KB.conditions.map(c => {
+    const rts = c.rts_days && c.rts_days[0] ? `RTS ${c.rts_days[0]}-${c.rts_days[1]}d` : 'RTS variable';
+    return `[${c.id}] ${c.n} (${c.r}) | Patrones: ${(c.p||[]).join('; ')} | ${rts} | Tx: ${c.tratamiento||''}`;
   }).join('\n');
 
-  return `
-=== BASE DE CONOCIMIENTO CLÍNICO FISIOSCRIPT ===
+  const tests = Object.entries(CLINICAL_KB.tests_by_region).flatMap(([rid, ts]) =>
+    ts.map(t => {
+      let s = `${t.n} (${rid}) → ${t.s}`;
+      if (t.se) s += ` | Sens:${Math.round(t.se*100)}%`;
+      if (t.sp) s += ` Espec:${Math.round(t.sp*100)}%`;
+      if (t.dor) s += ` | DOR:${t.dor}`;
+      s += ` | ${t.role}`;
+      return s;
+    })
+  ).join('\n');
 
-REGIONES: ${regions}
+  const redFlags = CLINICAL_KB.red_flags.map(r => `⚠ ${r.n} → ${r.sug} (${r.urg}) → ${r.act}`).join('\n');
 
-CONDICIONES CLÍNICAS (${CLINICAL_DB.conditions.length}):
-${conditions}
+  return `=== BASE CLÍNICA FISIOSCRIPT v3.0 ===
+REGIONES: ${regiones}
 
-TESTS CLÍNICOS CON EVIDENCIA (${CLINICAL_DB.tests.length}):
+PATOLOGÍAS Y TRATAMIENTOS:
+${condiciones}
+
+TESTS CLÍNICOS CON EVIDENCIA:
 ${tests}
 
-BANDERAS ROJAS (${CLINICAL_DB.red_flags.length}):
+BANDERAS ROJAS:
 ${redFlags}
-
-TIEMPOS DE RECUPERACIÓN:
-${recovery}
-=================================================`;
+======================================`;
 }
 
 const CLINICAL_CONTEXT = buildClinicalContext();
 
-// ── POST /api/generate ───────────────────────────────────────────────────────
+// ── POST /api/generate ────────────────────────────────────────────────────────
 app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
-  const { text } = req.body;
+  const { text, lang } = req.body;
+  const isEN = lang === 'en';
+  if (!text || typeof text !== "string") return res.status(400).json({ error: isEN ? "Field 'text' is required." : "El campo 'text' es requerido." });
+  if (text.trim().length < 10) return res.status(400).json({ error: isEN ? "Transcript too short." : "Transcripción demasiado corta." });
+  if (text.length > 15_000) return res.status(400).json({ error: isEN ? "Transcript too long." : "Transcripción demasiado larga." });
+  if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
 
-  if (!text || typeof text !== "string") return res.status(400).json({ error: "El campo 'text' es requerido." });
-  if (text.trim().length < 10) return res.status(400).json({ error: "Transcripción demasiado corta." });
-  if (text.length > 15_000) return res.status(400).json({ error: "Transcripción demasiado larga." });
-  if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Servidor mal configurado." });
+  const langInstruction = isEN
+    ? "Always respond in English. Use physiotherapy clinical terminology in English. Field labels like 'motivo', 'soap', etc. should have English values."
+    : "Responde siempre en español. Usa terminología clínica de fisioterapia en español.";
 
-  const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento clínico validada.
+  const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada.
+
+LANGUAGE: ${langInstruction}
 
 ${CLINICAL_CONTEXT}
 
-INSTRUCCIONES:
-Analiza la transcripción usando tu conocimiento clínico Y la base de datos anterior.
-Para los tests detectados, busca si están en la lista y usa sus datos de sensibilidad/especificidad.
-Para las banderas rojas, cruza los síntomas mencionados con la lista de red flags.
-Para la hipótesis, usa los patrones clínicos de las condiciones para calcular la confianza.
-Para recuperación, usa los tiempos de la base de datos si el diagnóstico coincide.
+INSTRUCCIONES CRÍTICAS:
+1. Analiza la transcripción usando la base de conocimiento anterior.
+2. Para cada diagnóstico hipotético, calcula una probabilidad (0-100%) basada en cuántos patrones clínicos de la base de datos coinciden.
+3. Para los tests detectados, usa la sensibilidad/especificidad de la base de datos.
+4. Para el tratamiento, usa el protocolo de la base de datos del condition_id identificado.
+5. Para recuperación, usa los rts_days de la base de datos.
 
-Devuelve ÚNICAMENTE este JSON exacto, sin markdown:
+Devuelve ÚNICAMENTE este JSON exacto, sin markdown ni texto adicional:
 {
   "historia": {
     "motivo": "motivo detallado con localización, inicio y características",
-    "edad": "edad y datos demográficos (profesión, actividad)",
-    "antecedentes": "antecedentes médicos, lesiones previas, cirugías",
-    "medicacion": "medicación actual, alergias, suplementos",
-    "deporte": "actividad física, nivel, frecuencia, postura laboral",
-    "exploracion": "exploración física: postura, ROM, palpación, fuerza, EVA",
-    "tratamiento": "técnicas aplicadas, ejercicios, pautas domiciliarias",
-    "observaciones": "evolución, pronóstico, factores psicosociales, objetivos"
+    "edad": "edad y datos demográficos",
+    "antecedentes": "antecedentes médicos y lesiones previas",
+    "medicacion": "medicación actual",
+    "deporte": "actividad física, nivel, frecuencia",
+    "exploracion": "exploración: postura, ROM, palpación, fuerza, EVA",
+    "tratamiento": "técnicas aplicadas y pautas",
+    "observaciones": "evolución y factores psicosociales"
   },
   "soap": {
-    "S": "síntomas subjetivos: queja principal, dolor (EVA, localización, irradiación, agravantes/aliviantes)",
-    "O": "hallazgos objetivos: postura, ROM con grados, tests y resultado, palpación, fuerza",
-    "A": "evaluación: diagnóstico fisioterápico, estructuras afectadas, severidad, estadio",
+    "S": "síntomas subjetivos completos",
+    "O": "hallazgos objetivos: ROM con grados, tests y resultado",
+    "A": "evaluación: diagnóstico fisioterápico, estructuras afectadas, severidad",
     "P": "plan: técnicas con dosis, ejercicios, objetivos, próxima cita"
   },
   "banderas_rojas": [
-    {
-      "titulo": "nombre corto",
-      "descripcion": "explicación clínica usando la base de datos si aplica",
-      "severidad": "alta | media",
-      "accion": "acción concreta recomendada"
-    }
+    {"titulo": "nombre", "descripcion": "explicación clínica", "severidad": "alta|media", "accion": "acción concreta"}
   ],
   "banderas_amarillas": [
-    {
-      "titulo": "nombre corto",
-      "descripcion": "factor psicosocial o riesgo cronificación",
-      "severidad": "media | baja",
-      "accion": "enfoque recomendado"
-    }
+    {"titulo": "nombre", "descripcion": "factor psicosocial", "severidad": "media|baja", "accion": "enfoque"}
   ],
   "hipotesis": {
-    "principal": "diagnóstico más probable (usa nombre exacto de condición si está en la base de datos)",
-    "condition_id": "id de la condición si coincide con alguna en la base de datos, o null",
+    "principal": "diagnóstico más probable (nombre exacto de la base de datos si coincide)",
+    "condition_id": "id exacto de la base de datos o null",
     "confianza": 0.75,
-    "razonamiento": "razonamiento clínico basado en patrones y tests detectados",
+    "razonamiento": "razonamiento clínico: qué patrones coinciden y cuáles no",
     "diferenciales": [
-      {"nombre": "diagnóstico diferencial 1", "probabilidad": "30%"},
-      {"nombre": "diagnóstico diferencial 2", "probabilidad": "15%"}
+      {"nombre": "diagnóstico diferencial 1", "probabilidad": 30, "condition_id": "id o null"},
+      {"nombre": "diagnóstico diferencial 2", "probabilidad": 15, "condition_id": "id o null"}
     ]
   },
   "tests": [
     {
-      "nombre": "nombre completo del test",
-      "zona": "zona anatómica",
+      "nombre": "nombre completo",
+      "zona": "región anatómica",
       "estructura": "estructura evaluada",
-      "resultado": "positivo | negativo",
-      "sensibilidad": "valor si está en base de datos o null",
-      "especificidad": "valor si está en base de datos o null",
-      "interpretacion": "qué significa clínicamente en este caso"
+      "resultado": "positivo|negativo|no realizado",
+      "sensibilidad": "valor% si está en base de datos o null",
+      "especificidad": "valor% si está en base de datos o null",
+      "interpretacion": "significado clínico en este caso"
     }
   ],
   "recuperacion": {
-    "estimacion": "tiempo estimado de recuperación basado en diagnóstico y base de datos",
-    "fase_actual": "agudo | subagudo | crónico | rehabilitación | vuelta_actividad",
-    "criterios_rts": ["criterio 1", "criterio 2", "criterio 3"],
-    "factores_riesgo": ["factor de riesgo 1 si aplica"],
+    "estimacion_dias": {"min": 14, "max": 42},
+    "estimacion_texto": "descripción legible del tiempo esperado",
+    "fase_actual": "agudo|subagudo|crónico|rehabilitación|vuelta_actividad",
+    "criterios_rts": ["criterio objetivo 1", "criterio objetivo 2", "criterio objetivo 3"],
+    "factores_riesgo_recaida": ["factor 1 si aplica"],
     "notas": "consideraciones específicas del caso"
+  },
+  "tratamiento_sugerido": {
+    "fase_actual": "Fase aguda|Fase subaguda|Fase de carga|Fase funcional|Mantenimiento",
+    "tecnicas_manuales": ["técnica 1 con indicación", "técnica 2"],
+    "ejercicios_clave": ["ejercicio 1 con dosis", "ejercicio 2 con dosis"],
+    "educacion_paciente": ["mensaje educativo clave 1", "mensaje 2"],
+    "proximos_pasos": "plan para próximas sesiones",
+    "derivacion": "derivación si es necesaria o 'No necesaria de momento'"
   }
 }
 
 REGLAS:
-- Si algo no se menciona: usa [] para listas o "No mencionado" para texto.
-- condition_id: pon el id de la base de datos si el diagnóstico coincide, si no pon null.
-- Para tests ya en la base de datos, incluye sensibilidad y especificidad.
-- Para recuperación, si el condition_id coincide con la base de datos, usa esos tiempos.
-- Sé exhaustivo y usa terminología clínica de fisioterapia en español.`;
+- condition_id: usa el ID exacto de la base de datos si el diagnóstico coincide. Esto es crítico para calcular tiempos de recuperación correctos.
+- confianza: 0.0-1.0 basado en coincidencia de patrones. Con 1-2 patrones: 0.3-0.5. Con 3-4 patrones: 0.5-0.7. Con 5+ patrones: 0.7-0.95.
+- estimacion_dias: usa rts_days de la base de datos si condition_id coincide.
+- Si algo no se menciona: usa [] para listas o "No mencionado" para campos de texto.
+- Sé exhaustivo con el tratamiento: protocolos reales de fisioterapia.`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
@@ -206,11 +217,11 @@ REGLAS:
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
-        max_tokens: 3500,
+        max_tokens: 4000,
         temperature: 0.1,
         messages: [
           { role: "system", content: system },
-          { role: "user", content: `Transcripción de la consulta:\n\n${text}` },
+          { role: "user", content: `Transcripción:\n\n${text}` },
         ],
       }),
       signal: controller.signal,
@@ -231,9 +242,9 @@ REGLAS:
 
     let parsed;
     try { parsed = JSON.parse(match[0]); }
-    catch (e) { return res.status(502).json({ error: "Error al parsear la respuesta." }); }
+    catch (e) { return res.status(502).json({ error: "Error al parsear respuesta." }); }
 
-    // Defaults
+    // Defaults y normalización
     parsed.historia = parsed.historia || {};
     parsed.soap = parsed.soap || {};
     parsed.banderas_rojas = Array.isArray(parsed.banderas_rojas) ? parsed.banderas_rojas : [];
@@ -241,68 +252,123 @@ REGLAS:
     parsed.hipotesis = parsed.hipotesis || {};
     parsed.tests = Array.isArray(parsed.tests) ? parsed.tests : [];
     parsed.recuperacion = parsed.recuperacion || {};
+    parsed.tratamiento_sugerido = parsed.tratamiento_sugerido || {};
 
-    // Enrich recovery from DB if condition_id matched
+    // Enriquecer desde KB si hay condition_id válido
     const cid = parsed.hipotesis?.condition_id;
-    if (cid && CLINICAL_DB.recovery[cid]) {
-      parsed.recuperacion._db_times = CLINICAL_DB.recovery[cid];
-    }
-    if (cid && CLINICAL_DB.rtp[cid]) {
-      parsed.recuperacion._db_rtp = CLINICAL_DB.rtp[cid];
+    const cond = cid ? conditionMap[cid] : null;
+
+    if (cond) {
+      // Enriquecer recuperación con datos reales de KB
+      if (cond.rts_days && cond.rts_days[0]) {
+        parsed.recuperacion._kb_rts_days = { min: cond.rts_days[0], max: cond.rts_days[1] };
+        // Si la IA no dio estimación, usar la de KB
+        if (!parsed.recuperacion.estimacion_dias?.min) {
+          parsed.recuperacion.estimacion_dias = { min: cond.rts_days[0], max: cond.rts_days[1] };
+        }
+      }
+      // Enriquecer tratamiento con protocolo de KB
+      if (cond.tratamiento && !parsed.tratamiento_sugerido._kb_tratamiento) {
+        parsed.tratamiento_sugerido._kb_tratamiento = cond.tratamiento;
+      }
+      parsed.hipotesis._kb_condition_name = cond.n;
     }
 
-    // Normalize test results
+    // Enriquecer tests con datos de KB
+    parsed.tests = parsed.tests.map(t => {
+      if (t.sensibilidad || t.especificidad) return t;
+      // Buscar en KB por nombre similar
+      for (const [rid, tests] of Object.entries(CLINICAL_KB.tests_by_region)) {
+        const match = tests.find(kt =>
+          kt.n.toLowerCase().includes(t.nombre?.toLowerCase()?.split(' ')[0]) ||
+          t.nombre?.toLowerCase()?.includes(kt.n.toLowerCase().split(' ')[0])
+        );
+        if (match && (match.se || match.sp)) {
+          t.sensibilidad = match.se ? Math.round(match.se*100)+'%' : null;
+          t.especificidad = match.sp ? Math.round(match.sp*100)+'%' : null;
+          break;
+        }
+      }
+      return t;
+    });
+
+    // Normalizar resultado de tests
     parsed.tests = parsed.tests.map(t => ({
       ...t,
       resultado: (t.resultado||'').toLowerCase().includes('pos') ? 'positivo'
         : (t.resultado||'').toLowerCase().includes('neg') ? 'negativo'
-        : t.resultado || '',
+        : t.resultado || 'no realizado',
     }));
 
-    console.log(`✓ ${parsed.banderas_rojas.length} red flags | ${parsed.tests.length} tests | cond_id: ${cid||'null'}`);
+    console.log(`✓ cond_id:${cid||'null'} | confianza:${parsed.hipotesis?.confianza} | red_flags:${parsed.banderas_rojas.length} | tests:${parsed.tests.length}`);
     return res.json(parsed);
 
   } catch (err) {
     clearTimeout(timeout);
     if (err.name === "AbortError") return res.status(504).json({ error: "La IA tardó demasiado. Inténtalo de nuevo." });
+    console.error("Error generate:", err.message);
     return res.status(500).json({ error: "Error interno del servidor." });
   }
 });
 
-// ── GET /api/clinical/condition/:id ─────────────────────────────────────────
+// ── GET /api/clinical/condition/:id ──────────────────────────────────────────
 app.get("/api/clinical/condition/:id", (req, res) => {
   const cid = req.params.id;
   const cond = conditionMap[cid];
   if (!cond) return res.status(404).json({ error: "Condición no encontrada." });
-  const recovery = CLINICAL_DB.recovery[cid] || [];
-  const rtp = CLINICAL_DB.rtp[cid] || [];
-  const tests = CLINICAL_DB.tests.filter(t => {
-    // find tests related to this condition via region
-    return t.r === cond.r;
-  });
-  res.json({ condition: cond, recovery, rtp, tests: tests.slice(0,10) });
+  const tests = testsByRegion[cond.r] || [];
+  res.json({ condition: cond, tests: tests.slice(0,10) });
 });
 
-// ── GET /api/clinical/region/:id ────────────────────────────────────────────
+// ── GET /api/clinical/region/:id ─────────────────────────────────────────────
 app.get("/api/clinical/region/:id", (req, res) => {
   const rid = req.params.id;
-  const conditions = CLINICAL_DB.conditions.filter(c => c.r === rid);
+  const conditions = CLINICAL_KB.conditions.filter(c => c.r === rid);
   const tests = testsByRegion[rid] || [];
-  const redFlags = CLINICAL_DB.red_flags.filter(r => r.r === rid);
-  res.json({ region: CLINICAL_DB.regions[rid], conditions, tests, red_flags: redFlags });
+  const redFlags = CLINICAL_KB.red_flags;
+  res.json({ region: CLINICAL_KB.regions[rid], conditions, tests, red_flags: redFlags });
 });
 
-// ── POST /api/stripe/checkout ────────────────────────────────────────────────
+// ── POST /api/stripe/checkout ─────────────────────────────────────────────────
 app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
-  if (!stripe) return res.status(500).json({ error: "Stripe no está configurado." });
-  const { priceId, email } = req.body;
+  if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
+  const { priceId, email, extraSeats } = req.body;
   if (!priceId) return res.status(400).json({ error: "priceId requerido." });
+
+  // Price IDs para profesionales extra (+5€/mes cada uno)
+  const EXTRA_SEAT_PRICE_MONTHLY = 'price_1Tcit7POSeyVBgtaC7CSaSJs'; // ← reemplazar con price ID real de Stripe
+  const EXTRA_SEAT_PRICE_ANNUAL  = 'price_1Tcit7POSeyVBgtaC7CSaSJs'; // ← reemplazar con price ID real de Stripe
+
+  // Detectar si es plan anual
+  const isAnual = priceId === 'price_1TWFFrPOSeyVBgta0XkvT9EZ' || priceId === 'price_1TWFFtPOSeyVBgtaN7yiBmPT';
+  const isClinica = priceId === 'price_1TWFFrPOSeyVBgtahQl9oQvJ' || priceId === 'price_1TWFFtPOSeyVBgtaN7yiBmPT';
+
+  // Construir line_items
+  const lineItems = [{ price: priceId, quantity: 1 }];
+
+  // Añadir profesionales extra si es plan clínica y se solicitan
+  const seats = parseInt(extraSeats) || 0;
+  if (isClinica && seats > 0 && seats <= 20) {
+    const extraPriceId = isAnual ? EXTRA_SEAT_PRICE_ANNUAL : EXTRA_SEAT_PRICE_MONTHLY;
+    // Solo añadir si el price ID extra está configurado (no es placeholder)
+    if (!extraPriceId.includes('XXXX') && !extraPriceId.includes('YYYY')) {
+      lineItems.push({ price: extraPriceId, quantity: seats });
+    }
+  }
+
   try {
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
       customer_email: email || undefined,
-      line_items: [{ price: priceId, quantity: 1 }],
+      line_items: lineItems,
+      subscription_data: {
+        trial_period_days: 14,
+        metadata: {
+          plan: priceId,
+          extra_seats: seats.toString(),
+        }
+      },
       success_url: `${process.env.FRONTEND_URL||"https://fisioscript.com"}/exito.html?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL||"https://fisioscript.com"}/precios.html`,
       locale: "es",
@@ -310,7 +376,8 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
     });
     return res.json({ url: session.url });
   } catch (err) {
-    return res.status(500).json({ error: "Error al crear la sesión de pago." });
+    console.error("Stripe checkout error:", err.message);
+    return res.status(500).json({ error: "Error al crear sesión de pago." });
   }
 });
 
@@ -321,14 +388,14 @@ app.post("/api/stripe/webhook", async (req, res) => {
   let event;
   try { event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET); }
   catch (err) { return res.status(400).send(`Webhook error: ${err.message}`); }
-  console.log(`Stripe: ${event.type}`);
+
+  console.log(`Stripe event: ${event.type}`);
+
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object;
       const email = session.customer_email;
       const priceId = session.line_items?.data?.[0]?.price?.id || '';
-
-      // Map price IDs to plan names
       const planMap = {
         'price_1TWFFrPOSeyVBgtaKHKpCA7T': 'individual_mensual',
         'price_1TWFFrPOSeyVBgta0XkvT9EZ': 'individual_anual',
@@ -336,13 +403,9 @@ app.post("/api/stripe/webhook", async (req, res) => {
         'price_1TWFFtPOSeyVBgtaN7yiBmPT': 'clinica_anual',
       };
       const plan = planMap[priceId] || 'individual_mensual';
-
-      console.log(`✓ Pago completado: ${email} → ${plan}`);
-
-      // Update user metadata in Supabase via Admin API
+      console.log(`✓ Pago: ${email} → ${plan}`);
       if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
         try {
-          // Find user by email
           const usersRes = await fetch(
             `${process.env.SUPABASE_URL}/auth/v1/admin/users?email=${encodeURIComponent(email)}`,
             { headers: { 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` } }
@@ -352,36 +415,30 @@ app.post("/api/stripe/webhook", async (req, res) => {
           if (userId) {
             await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
               method: 'PUT',
-              headers: {
-                'Content-Type': 'application/json',
-                'apikey': process.env.SUPABASE_SERVICE_KEY,
-                'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`
-              },
+              headers: { 'Content-Type': 'application/json', 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` },
               body: JSON.stringify({ user_metadata: { plan } })
             });
             console.log(`✓ Plan actualizado en Supabase: ${userId} → ${plan}`);
           }
-        } catch(e) {
-          console.error('Error actualizando plan en Supabase:', e.message);
-        }
+        } catch(e) { console.error('Error actualizando plan:', e.message); }
       }
       break;
     }
-    case "customer.subscription.deleted": {
+    case "customer.subscription.deleted":
       console.log(`✗ Suscripción cancelada: ${event.data.object.customer}`);
       break;
-    }
   }
   return res.json({ received: true });
 });
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// ── Error handlers ────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: "Ruta no encontrada." }));
 app.use((err, req, res, next) => { console.error(err.message); res.status(500).json({ error: "Error interno." }); });
 
 app.listen(PORT, () => {
   console.log(`\n✅  FisioScript API v3.0 → http://localhost:${PORT}`);
   console.log(`   GROQ_API_KEY:    ${process.env.GROQ_API_KEY ? "✓" : "✗ FALTA"}`);
-  console.log(`   STRIPE:          ${process.env.STRIPE_SECRET_KEY ? "✓" : "✗ no configurado"}`);
-  console.log(`   Clinical DB:     ${CLINICAL_DB.conditions.length} condiciones | ${CLINICAL_DB.tests.length} tests | ${CLINICAL_DB.red_flags.length} red flags\n`);
+  console.log(`   STRIPE:          ${process.env.STRIPE_SECRET_KEY ? "✓" : "✗"}`);
+  console.log(`   SUPABASE:        ${process.env.SUPABASE_URL ? "✓" : "✗ (sin actualización plan auto)"}`);
+  console.log(`   Clinical KB:     ${CLINICAL_KB.conditions.length} condiciones | ${Object.values(CLINICAL_KB.tests_by_region).flat().length} tests | ${CLINICAL_KB.red_flags.length} red flags\n`);
 });
