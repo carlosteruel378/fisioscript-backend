@@ -329,6 +329,28 @@ app.get("/api/clinical/region/:id", (req, res) => {
   res.json({ region: CLINICAL_KB.regions[rid], conditions, tests, red_flags: redFlags });
 });
 
+// ── POST /api/stripe/portal ───────────────────────────────────────────────────
+app.post("/api/stripe/portal", rateLimit(10, 60_000), async (req, res) => {
+  if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: "Email requerido." });
+  try {
+    // Find customer by email
+    const customers = await stripe.customers.list({ email, limit: 1 });
+    if (!customers.data.length) {
+      return res.status(404).json({ error: "No se encontró una suscripción activa para este email." });
+    }
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customers.data[0].id,
+      return_url: `${process.env.FRONTEND_URL || "https://fisioscript.com"}/mi-cuenta.html`,
+    });
+    return res.json({ url: session.url });
+  } catch (err) {
+    console.error("Portal error:", err.message);
+    return res.status(500).json({ error: "Error al abrir el portal de facturación." });
+  }
+});
+
 // ── POST /api/stripe/checkout ─────────────────────────────────────────────────
 app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
   if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
@@ -336,8 +358,8 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
   if (!priceId) return res.status(400).json({ error: "priceId requerido." });
 
   // Price IDs para profesionales extra (+5€/mes cada uno)
-  const EXTRA_SEAT_PRICE_MONTHLY = 'price_1Tcit7POSeyVBgtaC7CSaSJs'; // ← reemplazar con price ID real de Stripe
-  const EXTRA_SEAT_PRICE_ANNUAL  = 'price_1Tcit7POSeyVBgtaC7CSaSJs'; // ← reemplazar con price ID real de Stripe
+  const EXTRA_SEAT_PRICE_MONTHLY = 'price_1Tcit7POSeyVBgtaC7CSaSJs';
+  const EXTRA_SEAT_PRICE_ANNUAL  = 'price_1Tcit7POSeyVBgtaC7CSaSJs';
 
   // Detectar si es plan anual
   const isAnual = priceId === 'price_1TWFFrPOSeyVBgta0XkvT9EZ' || priceId === 'price_1TWFFtPOSeyVBgtaN7yiBmPT';
