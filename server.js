@@ -441,14 +441,16 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
       payment_method_types: ["card"],
       customer_email: email || undefined,
       line_items: lineItems,
+      metadata: {
+        price_id: priceId,
+        extra_seats: seats.toString(),
+      },
       subscription_data: {
-        trial_period_days: 14,
         metadata: {
-          plan: priceId,
-          extra_seats: seats.toString(),
+          price_id: priceId,
         }
       },
-      success_url: `${process.env.FRONTEND_URL||"https://fisioscript.com"}/exito.html?session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `${process.env.FRONTEND_URL||"https://fisioscript.com"}/fisioscript-app.html`,
       cancel_url: `${process.env.FRONTEND_URL||"https://fisioscript.com"}/precios.html`,
       locale: "es",
       allow_promotion_codes: true,
@@ -473,8 +475,9 @@ app.post("/api/stripe/webhook", async (req, res) => {
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object;
-      const email = session.customer_email;
-      const priceId = session.line_items?.data?.[0]?.price?.id || '';
+      const email = session.customer_email || session.customer_details?.email;
+      // price_id viene en metadata que guardamos al crear el checkout, o lo recuperamos
+      const priceId = session.metadata?.price_id || '';
       const planMap = {
         'price_1TWFFrPOSeyVBgtaKHKpCA7T': 'individual_mensual',
         'price_1TWFFrPOSeyVBgta0XkvT9EZ': 'individual_anual',
@@ -482,8 +485,8 @@ app.post("/api/stripe/webhook", async (req, res) => {
         'price_1TWFFtPOSeyVBgtaN7yiBmPT': 'clinica_anual',
       };
       const plan = planMap[priceId] || 'individual_mensual';
-      console.log(`✓ Pago: ${email} → ${plan}`);
-      if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
+      console.log(`✓ Pago completado: ${email} → ${plan} (priceId: ${priceId})`);
+      if (email && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
         try {
           const usersRes = await fetch(
             `${process.env.SUPABASE_URL}/auth/v1/admin/users?email=${encodeURIComponent(email)}`,
@@ -498,14 +501,38 @@ app.post("/api/stripe/webhook", async (req, res) => {
               body: JSON.stringify({ user_metadata: { plan } })
             });
             console.log(`✓ Plan actualizado en Supabase: ${userId} → ${plan}`);
+          } else {
+            console.warn(`⚠ Usuario no encontrado en Supabase para email: ${email}`);
           }
         } catch(e) { console.error('Error actualizando plan:', e.message); }
       }
       break;
     }
-    case "customer.subscription.deleted":
-      console.log(`✗ Suscripción cancelada: ${event.data.object.customer}`);
+    case "customer.subscription.deleted": {
+      const sub = event.data.object;
+      console.log(`✗ Suscripción cancelada: ${sub.customer}`);
+      // Buscar por customer_email si está disponible
+      const cancelEmail = sub.customer_email;
+      if (cancelEmail && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
+        try {
+          const usersRes = await fetch(
+            `${process.env.SUPABASE_URL}/auth/v1/admin/users?email=${encodeURIComponent(cancelEmail)}`,
+            { headers: { 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` } }
+          );
+          const usersData = await usersRes.json();
+          const userId = usersData?.users?.[0]?.id;
+          if (userId) {
+            await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` },
+              body: JSON.stringify({ user_metadata: { plan: 'cancelled' } })
+            });
+            console.log(`✓ Plan cancelado en Supabase: ${userId}`);
+          }
+        } catch(e) { console.error('Error cancelando plan:', e.message); }
+      }
       break;
+    }
   }
   return res.json({ received: true });
 });
