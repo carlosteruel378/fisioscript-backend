@@ -70,62 +70,96 @@ app.get("/", (req, res) => res.json({
   }
 }));
 
-// ── Build clinical context string ─────────────────────────────────────────────
-function buildClinicalContext() {
-  const regiones = Object.entries(CLINICAL_KB.regions).map(([id, n]) => `${id}:${n}`).join(', ');
-
+// ── Build compact clinical context (solo lo esencial para el prompt) ──────────
+function buildCompactContext() {
+  // Lista compacta de condiciones: id, nombre, región, patrones, RTS días
   const condiciones = CLINICAL_KB.conditions.map(c => {
-    const rts = c.rts_days && c.rts_days[0] ? `RTS ${c.rts_days[0]}–${c.rts_days[1]}d` : 'RTS variable/continuo';
-    const fases = (c.fases||[]).map(f => `${f.n}: ${f.c}`).join(' | ');
-    const rts_criterios = (c.criterios_rts||[]).join('; ');
-    const recaida = (c.factores_recaida||[]).join('; ');
-    const manuales = (c.tecnicas_manuales||[]).join('; ');
-    const ejercicio = c.ejercicio ? [
-      ...(c.ejercicio.inicial||[]),
-      ...(c.ejercicio.intermedio||[]),
-      ...(c.ejercicio.avanzado||[])
-    ].join('; ') : '';
-    const educacion = (c.educacion||[]).join('; ');
-    return `[${c.id}] ${c.n} (${c.r})
-  Patrones: ${(c.p||[]).join('; ')}
-  ${rts}
-  Fases: ${fases||'N/A'}
-  RTS criterios: ${rts_criterios||'N/A'}
-  Factores recaída: ${recaida||'N/A'}
-  Técnicas manuales: ${manuales||'N/A'}
-  Ejercicio: ${ejercicio||'N/A'}
-  Educación: ${educacion||'N/A'}
-  Tratamiento: ${c.tratamiento||'N/A'}`;
-  }).join('\n\n');
+    const rts = c.rts_days?.[0] ? `${c.rts_days[0]}–${c.rts_days[1]}d` : 'variable';
+    return `[${c.id}|${c.r}] ${c.n} | ${(c.p||[]).join('; ')} | RTS:${rts}`;
+  }).join('\n');
 
+  // Tests compactos: nombre, región, sens/espec
   const tests = Object.entries(CLINICAL_KB.tests_by_region).flatMap(([rid, ts]) =>
     ts.map(t => {
-      let s = `${t.n} (${rid}) → ${t.s}`;
-      if (t.se) s += ` | Sens:${Math.round(t.se*100)}%`;
-      if (t.sp) s += ` Espec:${Math.round(t.sp*100)}%`;
-      if (t.dor) s += ` | DOR:${t.dor}`;
-      s += ` | ${t.role}`;
+      let s = `${t.n}(${rid})→${t.s}`;
+      if (t.se) s += ` Se:${Math.round(t.se*100)}%`;
+      if (t.sp) s += ` Sp:${Math.round(t.sp*100)}%`;
+      s += `|${t.role}`;
       return s;
     })
   ).join('\n');
 
-  const redFlags = CLINICAL_KB.red_flags.map(r => `⚠ ${r.n} → ${r.sug} (${r.urg}) → ${r.act}`).join('\n');
+  // Red flags compactas
+  const redFlags = CLINICAL_KB.red_flags.map(r =>
+    `⚠${r.n}→${r.sug}(${r.urg})`
+  ).join('\n');
 
-  return `=== BASE CLÍNICA FISIOSCRIPT v4.0 ===
-REGIONES: ${regiones}
-
-PATOLOGÍAS CON PROTOCOLO CLÍNICO COMPLETO:
+  return `=== KB FISIOSCRIPT v4.0 ===
+CONDICIONES (id|región|nombre|patrones|RTS):
 ${condiciones}
 
-TESTS CLÍNICOS CON EVIDENCIA:
+TESTS:
 ${tests}
 
-BANDERAS ROJAS:
+RED FLAGS:
 ${redFlags}
-======================================`;
+===`;
 }
 
-const CLINICAL_CONTEXT = buildClinicalContext();
+// Contexto extendido para una condición específica detectada
+function getConditionContext(conditionId) {
+  const c = conditionMap[conditionId];
+  if (!c) return '';
+  const fases = (c.fases||[]).map(f => `${f.n}: ${f.c}`).join(' | ');
+  const rts = (c.criterios_rts||[]).join('; ');
+  const recaida = (c.factores_recaida||[]).join('; ');
+  const manuales = (c.tecnicas_manuales||[]).join('; ');
+  const ej = c.ejercicio ? [
+    ...(c.ejercicio.inicial||[]),
+    ...(c.ejercicio.intermedio||[]),
+    ...(c.ejercicio.avanzado||[])
+  ].join('; ') : '';
+  const edu = (c.educacion||[]).join('; ');
+  return `\nPROTOCOLO DETALLADO [${conditionId}]:
+Fases: ${fases}
+RTS criterios: ${rts}
+Factores recaída: ${recaida}
+Técnicas manuales: ${manuales}
+Ejercicio: ${ej}
+Educación: ${edu}`;
+}
+
+// Detectar región probable del texto para añadir protocolo relevante
+function detectRegion(text) {
+  const t = text.toLowerCase();
+  for (const [rid, keywords] of Object.entries(CLINICAL_KB.region_keywords)) {
+    if (keywords.some(kw => t.includes(kw))) return rid;
+  }
+  return null;
+}
+
+// Obtener condiciones de una región de forma compacta
+function getRegionProtocols(rid) {
+  if (!rid) return '';
+  const conds = CLINICAL_KB.conditions.filter(c => c.r === rid);
+  if (!conds.length) return '';
+  return '\nPROTOCOLOS REGIÓN ' + (CLINICAL_KB.regions[rid]||rid).toUpperCase() + ':\n' +
+    conds.map(c => {
+      const fases = (c.fases||[]).map(f => `${f.n}: ${f.c}`).join(' | ');
+      const rts = (c.criterios_rts||[]).join('; ');
+      const manuales = (c.tecnicas_manuales||[]).join('; ');
+      const ej = c.ejercicio ? [
+        ...(c.ejercicio.inicial||[]),
+        ...(c.ejercicio.intermedio||[]),
+        ...(c.ejercicio.avanzado||[])
+      ].join('; ') : '';
+      const edu = (c.educacion||[]).join('; ');
+      const recaida = (c.factores_recaida||[]).join('; ');
+      return `[${c.id}] ${c.n}\n  Fases: ${fases}\n  RTS: ${rts}\n  Manual: ${manuales}\n  Ejercicio: ${ej}\n  Educación: ${edu}\n  Recaída: ${recaida}`;
+    }).join('\n');
+}
+
+const COMPACT_CONTEXT = buildCompactContext();
 
 // ── POST /api/generate ────────────────────────────────────────────────────────
 app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
@@ -137,24 +171,27 @@ app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
   if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
 
   const langInstruction = isEN
-    ? "Always respond in English. Use physiotherapy clinical terminology in English. Field labels like 'motivo', 'soap', etc. should have English values."
+    ? "Always respond in English. Use physiotherapy clinical terminology in English."
     : "Responde siempre en español. Usa terminología clínica de fisioterapia en español.";
+
+  // Añadir protocolo detallado solo de la región detectada en la transcripción
+  const detectedRegion = detectRegion(text);
+  const regionProtocol = getRegionProtocols(detectedRegion);
 
   const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada.
 
 LANGUAGE: ${langInstruction}
 
-${CLINICAL_CONTEXT}
+${COMPACT_CONTEXT}${regionProtocol}
 
-INSTRUCCIONES CRÍTICAS:
-1. Analiza la transcripción usando la base de conocimiento anterior.
-2. Para cada diagnóstico hipotético, calcula una probabilidad (0-100%) basada en cuántos patrones clínicos de la base de datos coinciden.
-3. Para los tests detectados, usa la sensibilidad/especificidad de la base de datos.
-4. Para recuperacion: usa los rts_days, fases, criterios_rts y factores_recaida del condition_id identificado en la KB.
-5. Para tratamiento: usa las tecnicas_manuales, ejercicio y educacion del condition_id identificado en la KB.
-6. Adapta los protocolos a la clínica real del paciente — la KB es la base, la clínica individual es el ajuste.
+INSTRUCCIONES:
+1. Analiza la transcripción usando la base de conocimiento.
+2. Calcula probabilidad (0-100%) según patrones clínicos coincidentes.
+3. Para tests: usa sensibilidad/especificidad de la KB.
+4. Para recuperacion y tratamiento: usa los protocolos del condition_id identificado.
+5. Si no se menciona algo: usa [] para listas o "No mencionado" para texto.
 
-Devuelve ÚNICAMENTE este JSON exacto, sin markdown ni texto adicional:
+Devuelve ÚNICAMENTE este JSON, sin markdown ni texto adicional:
 {
   "historia": {
     "motivo": "motivo detallado con localización, inicio y características",
