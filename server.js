@@ -21,6 +21,18 @@ Object.entries(CLINICAL_KB.tests_by_region).forEach(([rid, tests]) => {
 // ── Stripe ───────────────────────────────────────────────────────────────────
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
+// ── Price IDs (configurar en Railway como variables de entorno) ───────────────
+const PRICE_IDS = {
+  individual_mensual: process.env.PRICE_INDIVIDUAL_MONTHLY || 'price_1TeJvuAJekfKUNa02VnyGS0D',
+  individual_anual:   process.env.PRICE_INDIVIDUAL_ANNUAL  || 'price_1TeJxEAJekfKUNa0ivDWecRA',
+  clinica_mensual:    process.env.PRICE_CLINICA_MONTHLY    || '',
+  clinica_anual:      process.env.PRICE_CLINICA_ANNUAL     || '',
+};
+// Mapa inverso priceId → plan
+const PLAN_MAP = Object.fromEntries(
+  Object.entries(PRICE_IDS).filter(([,v]) => v).map(([k,v]) => [v, k])
+);
+
 // ── Rate limiting ────────────────────────────────────────────────────────────
 const rateLimitMap = new Map();
 function rateLimit(maxReqs, windowMs) {
@@ -386,6 +398,42 @@ app.get("/api/clinical/region/:id", (req, res) => {
   res.json({ region: CLINICAL_KB.regions[rid], conditions, tests, red_flags: redFlags });
 });
 
+// ── GET /api/prices ───────────────────────────────────────────────────────────
+app.get("/api/prices", (req, res) => {
+  res.json({
+    individual_mensual: PRICE_IDS.individual_mensual,
+    individual_anual:   PRICE_IDS.individual_anual,
+  });
+});
+
+// ── DELETE /api/account ───────────────────────────────────────────────────────
+app.delete("/api/account", rateLimit(5, 60_000), async (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith('Bearer ')) return res.status(401).json({ error: "No autorizado." });
+  const token = auth.slice(7);
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY)
+    return res.status(500).json({ error: "Configuración incompleta." });
+  try {
+    // Verify token and get user
+    const verifyRes = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {
+      headers: { 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${token}` }
+    });
+    const user = await verifyRes.json();
+    if (!user?.id) return res.status(401).json({ error: "Token inválido." });
+    // Delete user from Supabase
+    const deleteRes = await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${user.id}`, {
+      method: 'DELETE',
+      headers: { 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` }
+    });
+    if (!deleteRes.ok) throw new Error('Error al eliminar usuario');
+    console.log(`✓ Cuenta eliminada: ${user.email}`);
+    return res.json({ ok: true });
+  } catch(e) {
+    console.error('Delete account error:', e.message);
+    return res.status(500).json({ error: "Error al eliminar la cuenta." });
+  }
+});
+
 // ── POST /api/stripe/portal ───────────────────────────────────────────────────
 app.post("/api/stripe/portal", rateLimit(10, 60_000), async (req, res) => {
   if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
@@ -419,8 +467,8 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
   const EXTRA_SEAT_PRICE_ANNUAL  = 'price_1Tcit7POSeyVBgtaC7CSaSJs';
 
   // Detectar si es plan anual
-  const isAnual = priceId === 'price_1TWFFrPOSeyVBgta0XkvT9EZ' || priceId === 'price_1TWFFtPOSeyVBgtaN7yiBmPT';
-  const isClinica = priceId === 'price_1TWFFrPOSeyVBgtahQl9oQvJ' || priceId === 'price_1TWFFtPOSeyVBgtaN7yiBmPT';
+  const isAnual   = priceId === PRICE_IDS.individual_anual  || priceId === PRICE_IDS.clinica_anual;
+  const isClinica = priceId === PRICE_IDS.clinica_mensual   || priceId === PRICE_IDS.clinica_anual;
 
   // Construir line_items
   const lineItems = [{ price: priceId, quantity: 1 }];
@@ -478,13 +526,7 @@ app.post("/api/stripe/webhook", async (req, res) => {
       const email = session.customer_email || session.customer_details?.email;
       // price_id viene en metadata que guardamos al crear el checkout, o lo recuperamos
       const priceId = session.metadata?.price_id || '';
-      const planMap = {
-        'price_1TWFFrPOSeyVBgtaKHKpCA7T': 'individual_mensual',
-        'price_1TWFFrPOSeyVBgta0XkvT9EZ': 'individual_anual',
-        'price_1TWFFrPOSeyVBgtahQl9oQvJ': 'clinica_mensual',
-        'price_1TWFFtPOSeyVBgtaN7yiBmPT': 'clinica_anual',
-      };
-      const plan = planMap[priceId] || 'individual_mensual';
+      const plan = PLAN_MAP[priceId] || 'individual_mensual';
       console.log(`✓ Pago completado: ${email} → ${plan} (priceId: ${priceId})`);
       if (email && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
         try {
@@ -542,9 +584,22 @@ app.use((req, res) => res.status(404).json({ error: "Ruta no encontrada." }));
 app.use((err, req, res, next) => { console.error(err.message); res.status(500).json({ error: "Error interno." }); });
 
 app.listen(PORT, () => {
-  console.log(`\n✅  FisioScript API v3.0 → http://localhost:${PORT}`);
+  console.log(`\n✅  FisioScript API v4.0 → http://localhost:${PORT}`);
   console.log(`   GROQ_API_KEY:    ${process.env.GROQ_API_KEY ? "✓" : "✗ FALTA"}`);
-  console.log(`   STRIPE:          ${process.env.STRIPE_SECRET_KEY ? "✓" : "✗"}`);
+  console.log(`   STRIPE:          ${process.env.STRIPE_SECRET_KEY ? "✓ " + process.env.STRIPE_SECRET_KEY.slice(0,12) + "..." : "✗"}`);
   console.log(`   SUPABASE:        ${process.env.SUPABASE_URL ? "✓" : "✗ (sin actualización plan auto)"}`);
   console.log(`   Clinical KB:     ${CLINICAL_KB.conditions.length} condiciones | ${Object.values(CLINICAL_KB.tests_by_region).flat().length} tests | ${CLINICAL_KB.red_flags.length} red flags\n`);
+}).on('error', (err) => {
+  console.error('❌ Error arrancando servidor:', err.message);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ Error no capturado:', err.message, err.stack);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Promesa rechazada:', reason);
+  process.exit(1);
 });
