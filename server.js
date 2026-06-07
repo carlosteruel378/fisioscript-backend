@@ -55,11 +55,22 @@ app.use((req, res, next) => {
 const allowedOrigins = [
   "http://localhost:3000","http://localhost:5500",
   "http://127.0.0.1:5500","http://127.0.0.1:3000",
+  "https://fisioscript.com",
+  "https://www.fisioscript.com",
+  "https://fisioscript.pages.dev",
   process.env.FRONTEND_URL,
+  process.env.FRONTEND_URL_2,
 ].filter(Boolean);
 
 app.use(cors({
-  origin: (origin, cb) => (!origin || allowedOrigins.includes(origin)) ? cb(null, true) : cb(new Error("CORS no permitido")),
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // allow non-browser requests
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    // Allow any Cloudflare Pages preview URLs for this project
+    if (origin.endsWith('.pages.dev') && origin.includes('fisioscript')) return cb(null, true);
+    return cb(new Error("CORS no permitido"));
+  },
+  credentials: true,
 }));
 
 app.use("/api/stripe/webhook", express.raw({ type: "application/json" }));
