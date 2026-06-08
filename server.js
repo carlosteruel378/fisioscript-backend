@@ -562,7 +562,7 @@ app.post("/api/stripe/portal", rateLimit(10, 60_000), async (req, res) => {
 // ── POST /api/stripe/checkout ─────────────────────────────────────────────────
 app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
   if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
-  const { priceId, email, extraSeats } = req.body;
+  const { priceId, email, extraSeats, userId } = req.body;
   if (!priceId) return res.status(400).json({ error: "priceId requerido." });
 
   // Price IDs para profesionales extra (+5€/mes cada uno)
@@ -595,10 +595,12 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
       metadata: {
         price_id: priceId,
         extra_seats: seats.toString(),
+        user_id: userId || '',
       },
       subscription_data: {
         metadata: {
           price_id: priceId,
+          user_id: userId || '',
         }
       },
       success_url: `${process.env.FRONTEND_URL||"https://fisioscript.com"}/fisioscript-app.html`,
@@ -612,6 +614,72 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
     return res.status(500).json({ error: "Error al crear sesión de pago." });
   }
 });
+
+// ── Helpers Supabase admin ────────────────────────────────────────────────────
+// Resuelve el ID de usuario: primero por ID directo (metadata), luego por email.
+// IMPORTANTE: el endpoint admin/users IGNORA el filtro ?email=, así que hay que
+// recorrer la lista y filtrar nosotros por email exacto.
+async function resolveUserId(metaUserId, email) {
+  const headers = {
+    'apikey': process.env.SUPABASE_SERVICE_KEY,
+    'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+  };
+
+  // 1. Si tenemos el userId de la metadata, verificar que existe y usarlo
+  if (metaUserId) {
+    try {
+      const r = await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${metaUserId}`, { headers });
+      if (r.ok) {
+        const u = await r.json();
+        if (u?.id) return u.id;
+      }
+    } catch(e) { /* continuar al fallback */ }
+  }
+
+  // 2. Fallback: buscar por email recorriendo la lista paginada y filtrando exacto
+  if (email) {
+    const target = email.toLowerCase().trim();
+    let page = 1;
+    const perPage = 200;
+    while (page <= 10) { // hasta 2000 usuarios
+      const r = await fetch(
+        `${process.env.SUPABASE_URL}/auth/v1/admin/users?page=${page}&per_page=${perPage}`,
+        { headers }
+      );
+      if (!r.ok) break;
+      const data = await r.json();
+      const users = data?.users || [];
+      const match = users.find(u => (u.email || '').toLowerCase().trim() === target);
+      if (match) return match.id;
+      if (users.length < perPage) break; // última página
+      page++;
+    }
+  }
+  return null;
+}
+
+async function updateUserPlan(userId, plan) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'apikey': process.env.SUPABASE_SERVICE_KEY,
+    'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+  };
+  // Fetch existing metadata so we don't wipe name, trial_start, terms_accepted_at, etc.
+  let existing = {};
+  try {
+    const r = await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, { headers });
+    if (r.ok) {
+      const u = await r.json();
+      existing = u?.user_metadata || {};
+    }
+  } catch(e) { /* if fetch fails, proceed with just the plan */ }
+
+  return fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ user_metadata: { ...existing, plan } }),
+  });
+}
 
 // ── POST /api/stripe/webhook ──────────────────────────────────────────────────
 app.post("/api/stripe/webhook", async (req, res) => {
@@ -627,27 +695,19 @@ app.post("/api/stripe/webhook", async (req, res) => {
     case "checkout.session.completed": {
       const session = event.data.object;
       const email = session.customer_email || session.customer_details?.email;
-      // price_id viene en metadata que guardamos al crear el checkout, o lo recuperamos
       const priceId = session.metadata?.price_id || '';
+      const metaUserId = session.metadata?.user_id || '';
       const plan = PLAN_MAP[priceId] || 'individual_mensual';
-      console.log(`✓ Pago completado: ${email} → ${plan} (priceId: ${priceId})`);
-      if (email && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
+      console.log(`✓ Pago completado: ${email} → ${plan} (priceId: ${priceId}, userId: ${metaUserId || 'no enviado'})`);
+
+      if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
         try {
-          const usersRes = await fetch(
-            `${process.env.SUPABASE_URL}/auth/v1/admin/users?email=${encodeURIComponent(email)}`,
-            { headers: { 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` } }
-          );
-          const usersData = await usersRes.json();
-          const userId = usersData?.users?.[0]?.id;
+          const userId = await resolveUserId(metaUserId, email);
           if (userId) {
-            await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json', 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` },
-              body: JSON.stringify({ user_metadata: { plan } })
-            });
+            await updateUserPlan(userId, plan);
             console.log(`✓ Plan actualizado en Supabase: ${userId} → ${plan}`);
           } else {
-            console.warn(`⚠ Usuario no encontrado en Supabase para email: ${email}`);
+            console.warn(`⚠ Usuario no encontrado (userId: ${metaUserId}, email: ${email})`);
           }
         } catch(e) { console.error('Error actualizando plan:', e.message); }
       }
@@ -656,22 +716,13 @@ app.post("/api/stripe/webhook", async (req, res) => {
     case "customer.subscription.deleted": {
       const sub = event.data.object;
       console.log(`✗ Suscripción cancelada: ${sub.customer}`);
-      // Buscar por customer_email si está disponible
+      const cancelMetaUserId = sub.metadata?.user_id || '';
       const cancelEmail = sub.customer_email;
-      if (cancelEmail && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
+      if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
         try {
-          const usersRes = await fetch(
-            `${process.env.SUPABASE_URL}/auth/v1/admin/users?email=${encodeURIComponent(cancelEmail)}`,
-            { headers: { 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` } }
-          );
-          const usersData = await usersRes.json();
-          const userId = usersData?.users?.[0]?.id;
+          const userId = await resolveUserId(cancelMetaUserId, cancelEmail);
           if (userId) {
-            await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json', 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}` },
-              body: JSON.stringify({ user_metadata: { plan: 'cancelled' } })
-            });
+            await updateUserPlan(userId, 'cancelled');
             console.log(`✓ Plan cancelado en Supabase: ${userId}`);
           }
         } catch(e) { console.error('Error cancelando plan:', e.message); }
