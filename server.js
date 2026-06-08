@@ -186,7 +186,7 @@ const COMPACT_CONTEXT = buildCompactContext();
 
 // ── POST /api/generate ────────────────────────────────────────────────────────
 app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
-  const { text, lang } = req.body;
+  const { text, lang, previous_session } = req.body;
   const isEN = lang === 'en';
   if (!text || typeof text !== "string") return res.status(400).json({ error: isEN ? "Field 'text' is required." : "El campo 'text' es requerido." });
   if (text.trim().length < 10) return res.status(400).json({ error: isEN ? "Transcript too short." : "Transcripción demasiado corta." });
@@ -201,11 +201,34 @@ app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
   const detectedRegion = detectRegion(text);
   const regionProtocol = getRegionProtocols(detectedRegion);
 
+  // Contexto de la sesión anterior (si es una revisión de un paciente conocido)
+  let previousContext = "";
+  let isFollowUp = false;
+  if (previous_session && typeof previous_session === "object") {
+    isFollowUp = true;
+    const ps = previous_session;
+    const parts = [];
+    if (ps.fecha) parts.push(`Fecha sesión anterior: ${ps.fecha}`);
+    if (ps.motivo) parts.push(`Motivo previo: ${ps.motivo}`);
+    if (ps.diagnostico) parts.push(`Diagnóstico previo: ${ps.diagnostico}`);
+    if (ps.fase) parts.push(`Fase previa: ${ps.fase}`);
+    if (ps.eva_pre !== null && ps.eva_pre !== undefined) parts.push(`EVA previo: ${ps.eva_pre}${ps.eva_post !== null && ps.eva_post !== undefined ? ` → ${ps.eva_post}` : ''}`);
+    if (ps.plan) parts.push(`Plan previo: ${ps.plan}`);
+    if (ps.tratamiento) parts.push(`Tratamiento previo: ${ps.tratamiento}`);
+    if (ps.numero_sesiones) parts.push(`Número de sesiones previas: ${ps.numero_sesiones}`);
+    previousContext = `
+
+CONTEXTO DE SESIÓN ANTERIOR (esta es una sesión de SEGUIMIENTO del mismo paciente):
+${parts.join("\n")}
+
+IMPORTANTE: Como es una sesión de seguimiento, además de analizar la transcripción actual, debes generar un campo "evolucion" que compare el estado actual con la sesión anterior (mejora, estancamiento o empeoramiento del dolor y la función, respuesta al tratamiento, y ajustes recomendados al plan).`;
+  }
+
   const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada.
 
 LANGUAGE: ${langInstruction}
 
-${COMPACT_CONTEXT}${regionProtocol}
+${COMPACT_CONTEXT}${regionProtocol}${previousContext}
 
 INSTRUCCIONES:
 1. Analiza la transcripción usando la base de conocimiento.
@@ -275,7 +298,13 @@ Devuelve ÚNICAMENTE este JSON, sin markdown ni texto adicional:
     "educacion_paciente": ["mensaje educativo clave de la KB", "mensaje 2"],
     "proximos_pasos": "plan para próximas sesiones",
     "derivacion": "derivación si es necesaria o 'No necesaria de momento'"
-  }
+  }${isFollowUp ? `,
+  "evolucion": {
+    "tendencia": "mejora|estancamiento|empeoramiento",
+    "resumen": "párrafo comparando el estado actual con la sesión anterior: dolor, función, respuesta al tratamiento",
+    "cambio_eva": "descripción del cambio en el dolor respecto a la sesión anterior",
+    "ajuste_plan": "ajustes recomendados al plan de tratamiento según la evolución observada"
+  }` : ""}
 }
 
 REGLAS:
@@ -333,6 +362,11 @@ REGLAS:
     parsed.tests = Array.isArray(parsed.tests) ? parsed.tests : [];
     parsed.recuperacion = parsed.recuperacion || {};
     parsed.tratamiento_sugerido = parsed.tratamiento_sugerido || {};
+    if (parsed.evolucion && typeof parsed.evolucion === "object") {
+      // keep as-is
+    } else {
+      parsed.evolucion = null;
+    }
 
     // Enriquecer desde KB si hay condition_id válido
     const cid = parsed.hipotesis?.condition_id;
