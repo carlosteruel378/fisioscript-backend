@@ -352,6 +352,22 @@ REGLAS:
         parsed.tratamiento_sugerido._kb_tratamiento = cond.tratamiento;
       }
       parsed.hipotesis._kb_condition_name = cond.n;
+
+      // Protocolo de ejercicios estructurado por fases desde la KB
+      if (cond.ejercicio) {
+        parsed.protocolo_ejercicios = {
+          condition_id: cid,
+          condition_name: cond.n,
+          inicial: cond.ejercicio.inicial || [],
+          intermedio: cond.ejercicio.intermedio || [],
+          avanzado: cond.ejercicio.avanzado || [],
+          tecnicas_manuales: cond.tecnicas_manuales || [],
+          criterios_rts: cond.criterios_rts || [],
+          factores_recaida: cond.factores_recaida || [],
+          educacion: cond.educacion || [],
+          fases: cond.fases || [],
+        };
+      }
     }
 
     // Enriquecer tests con datos de KB
@@ -388,6 +404,48 @@ REGLAS:
     if (err.name === "AbortError") return res.status(504).json({ error: "La IA tardó demasiado. Inténtalo de nuevo." });
     console.error("Error generate:", err.message);
     return res.status(500).json({ error: "Error interno del servidor." });
+  }
+});
+
+// ── POST /api/evolucion — resumen de evolución del paciente ───────────────────
+app.post("/api/evolucion", rateLimit(15, 60_000), async (req, res) => {
+  const { patient, sessions, totalSessions } = req.body || {};
+  if (!sessions || typeof sessions !== "string") return res.status(400).json({ error: "Faltan datos de sesiones." });
+  if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
+
+  const prompt = `Eres un fisioterapeuta experto redactando un resumen clínico de evolución. A partir del historial de sesiones de un paciente, redacta un párrafo profesional y conciso (máximo 120 palabras) que sintetice: el motivo inicial, la evolución del dolor y la función a lo largo de las sesiones, la respuesta al tratamiento, y el estado actual. Usa lenguaje clínico claro. No inventes datos que no estén. Responde SOLO con el párrafo, sin encabezados.
+
+Paciente: ${patient||'—'} (${totalSessions||0} sesiones)
+Historial:
+${sessions.slice(0, 6000)}`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.4,
+        max_tokens: 400,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!response.ok) {
+      if (response.status === 429) return res.status(429).json({ error: "Servicio saturado." });
+      return res.status(502).json({ error: "Error al procesar con IA." });
+    }
+    const data = await response.json();
+    const resumen = data.choices?.[0]?.message?.content?.trim() || "";
+    return res.json({ resumen });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === "AbortError") return res.status(504).json({ error: "La IA tardó demasiado." });
+    console.error("Error evolucion:", err.message);
+    return res.status(500).json({ error: "Error interno." });
   }
 });
 
