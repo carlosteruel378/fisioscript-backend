@@ -192,34 +192,59 @@ app.post("/api/transcribe", rateLimit(20, 60_000), async (req, res) => {
   if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
   const audioBuffer = req.body;
   if (!audioBuffer || !audioBuffer.length) return res.status(400).json({ error: "No se recibió audio." });
-  if (audioBuffer.length < 2000) return res.status(400).json({ error: "Audio demasiado corto." });
+  if (audioBuffer.length < 1000) return res.status(400).json({ error: "Audio demasiado corto." });
   if (audioBuffer.length > 45 * 1024 * 1024) return res.status(400).json({ error: "Audio demasiado largo." });
 
   const lang = (req.query.lang === 'en') ? 'en' : 'es';
+  // Formato del audio según lo que mande el cliente (webm por defecto)
+  const fmtParam = (req.query.fmt || 'webm').toLowerCase();
+  const fmtMap = {
+    webm: { mime: 'audio/webm', name: 'consulta.webm' },
+    mp4:  { mime: 'audio/mp4',  name: 'consulta.mp4'  },
+    m4a:  { mime: 'audio/mp4',  name: 'consulta.m4a'  },
+    ogg:  { mime: 'audio/ogg',  name: 'consulta.ogg'  },
+  };
+  const fmt = fmtMap[fmtParam] || fmtMap.webm;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60_000);
+  const groqPrompt = lang === 'es'
+    ? "Consulta de fisioterapia. Terminología clínica: lumbalgia, cervicalgia, tendinopatía, manguito rotador, isquiotibiales, propiocepción, dorsiflexión, EVA, ROM."
+    : "Physiotherapy consultation. Clinical terminology.";
+
+  // Función que hace una llamada a Groq con timeout largo
+  async function callGroq() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 110_000);
+    try {
+      const form = new FormData();
+      form.append("file", new Blob([audioBuffer], { type: fmt.mime }), fmt.name);
+      form.append("model", "whisper-large-v3-turbo");
+      form.append("language", lang);
+      form.append("temperature", "0");
+      form.append("response_format", "json");
+      form.append("prompt", groqPrompt);
+
+      const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
+        body: form,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      return response;
+    } catch (e) {
+      clearTimeout(timeout);
+      throw e;
+    }
+  }
 
   try {
-    // Construir multipart/form-data para Groq (FormData/Blob nativos en Node 18+)
-    const form = new FormData();
-    form.append("file", new Blob([audioBuffer], { type: "audio/webm" }), "consulta.webm");
-    form.append("model", "whisper-large-v3-turbo");
-    form.append("language", lang);
-    form.append("temperature", "0");
-    form.append("response_format", "json");
-    // Prompt para mejorar terminología clínica de fisioterapia
-    form.append("prompt", lang === 'es'
-      ? "Consulta de fisioterapia. Terminología clínica: lumbalgia, cervicalgia, tendinopatía, manguito rotador, isquiotibiales, propiocepción, dorsiflexión, EVA, ROM."
-      : "Physiotherapy consultation. Clinical terminology.");
+    let response = await callGroq();
 
-    const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
-      body: form,
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
+    // Reintento único ante saturación (429) o error de servidor de Groq (5xx)
+    if (response.status === 429 || response.status >= 500) {
+      await new Promise(r => setTimeout(r, 2000));
+      response = await callGroq();
+    }
 
     if (!response.ok) {
       const errText = await response.text().catch(() => "");
@@ -232,7 +257,6 @@ app.post("/api/transcribe", rateLimit(20, 60_000), async (req, res) => {
     const text = (data.text || "").trim();
     return res.json({ text });
   } catch (err) {
-    clearTimeout(timeout);
     if (err.name === "AbortError") return res.status(504).json({ error: "La transcripción tardó demasiado." });
     console.error("Transcribe error:", err.message);
     return res.status(500).json({ error: "Error al transcribir." });
@@ -241,7 +265,7 @@ app.post("/api/transcribe", rateLimit(20, 60_000), async (req, res) => {
 
 // ── POST /api/generate ────────────────────────────────────────────────────────
 app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
-  const { text, lang, previous_session } = req.body;
+  const { text, lang, previous_session, episode, session_type } = req.body;
   const isEN = lang === 'en';
   if (!text || typeof text !== "string") return res.status(400).json({ error: isEN ? "Field 'text' is required." : "El campo 'text' es requerido." });
   if (text.trim().length < 10) return res.status(400).json({ error: isEN ? "Transcript too short." : "Transcripción demasiado corta." });
@@ -256,27 +280,57 @@ app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
   const detectedRegion = detectRegion(text);
   const regionProtocol = getRegionProtocols(detectedRegion);
 
-  // Contexto de la sesión anterior (si es una revisión de un paciente conocido)
+  // ── Tipo de sesión: primera visita vs seguimiento ──────────────────────────
+  // session_type lo envía el frontend; si no, se infiere de la presencia de episodio.
+  const hasEpisode = (episode && typeof episode === 'object' && Array.isArray(episode.sessions) && episode.sessions.length)
+                  || (previous_session && typeof previous_session === 'object');
+  const isFollowUp = session_type === 'seguimiento' || (session_type !== 'primera_visita' && hasEpisode);
+
   let previousContext = "";
-  let isFollowUp = false;
-  if (previous_session && typeof previous_session === "object") {
-    isFollowUp = true;
-    const ps = previous_session;
+  if (isFollowUp) {
     const parts = [];
-    if (ps.fecha) parts.push(`Fecha sesión anterior: ${ps.fecha}`);
-    if (ps.motivo) parts.push(`Motivo previo: ${ps.motivo}`);
-    if (ps.diagnostico) parts.push(`Diagnóstico previo: ${ps.diagnostico}`);
-    if (ps.fase) parts.push(`Fase previa: ${ps.fase}`);
-    if (ps.eva_pre !== null && ps.eva_pre !== undefined) parts.push(`EVA previo: ${ps.eva_pre}${ps.eva_post !== null && ps.eva_post !== undefined ? ` → ${ps.eva_post}` : ''}`);
-    if (ps.plan) parts.push(`Plan previo: ${ps.plan}`);
-    if (ps.tratamiento) parts.push(`Tratamiento previo: ${ps.tratamiento}`);
-    if (ps.numero_sesiones) parts.push(`Número de sesiones previas: ${ps.numero_sesiones}`);
+
+    if (episode && typeof episode === 'object') {
+      // Contexto estructurado del EPISODIO (motivo de consulta actual)
+      if (episode.diagnostico) parts.push(`Diagnóstico del episodio (primera visita): ${episode.diagnostico}`);
+      if (episode.motivo_inicial) parts.push(`Motivo inicial del episodio: ${episode.motivo_inicial}`);
+      if (episode.fecha_inicio) parts.push(`Fecha primera visita del episodio: ${episode.fecha_inicio}`);
+      if (episode.fase_actual) parts.push(`Fase actual del tratamiento: ${episode.fase_actual}`);
+      if (Array.isArray(episode.objetivos) && episode.objetivos.length)
+        parts.push(`Objetivos basales establecidos: ${episode.objetivos.map(o => typeof o === 'string' ? o : (o.texto||o.objetivo||'')).filter(Boolean).join(' | ')}`);
+
+      // Trayectoria EVA de las últimas sesiones
+      if (Array.isArray(episode.sessions) && episode.sessions.length) {
+        const traj = episode.sessions.slice(0, 4).map((s, i) => {
+          const bits = [];
+          if (s.fecha) bits.push(s.fecha);
+          if (s.eva_pre !== null && s.eva_pre !== undefined) bits.push(`EVA ${s.eva_pre}${s.eva_post!==null&&s.eva_post!==undefined?'→'+s.eva_post:''}`);
+          if (s.fase) bits.push(`fase: ${s.fase}`);
+          if (s.tratamiento) bits.push(`tto: ${s.tratamiento}`);
+          return `  • ${bits.join(', ')}`;
+        }).join('\n');
+        parts.push(`Trayectoria reciente (más reciente primero):\n${traj}`);
+      }
+      if (episode.num_sesiones) parts.push(`Sesiones previas en este episodio: ${episode.num_sesiones}`);
+    } else if (previous_session && typeof previous_session === 'object') {
+      // Compatibilidad: formato antiguo de una sola sesión
+      const ps = previous_session;
+      if (ps.fecha) parts.push(`Fecha sesión anterior: ${ps.fecha}`);
+      if (ps.motivo) parts.push(`Motivo previo: ${ps.motivo}`);
+      if (ps.diagnostico) parts.push(`Diagnóstico previo: ${ps.diagnostico}`);
+      if (ps.fase) parts.push(`Fase previa: ${ps.fase}`);
+      if (ps.eva_pre !== null && ps.eva_pre !== undefined) parts.push(`EVA previo: ${ps.eva_pre}${ps.eva_post!==null&&ps.eva_post!==undefined?` → ${ps.eva_post}`:''}`);
+      if (ps.plan) parts.push(`Plan previo: ${ps.plan}`);
+      if (ps.tratamiento) parts.push(`Tratamiento previo: ${ps.tratamiento}`);
+      if (ps.numero_sesiones) parts.push(`Número de sesiones previas: ${ps.numero_sesiones}`);
+    }
+
     previousContext = `
 
-CONTEXTO DE SESIÓN ANTERIOR (esta es una sesión de SEGUIMIENTO del mismo paciente):
+CONTEXTO DEL EPISODIO (esta es una sesión de SEGUIMIENTO):
 ${parts.join("\n")}
 
-IMPORTANTE: Como es una sesión de seguimiento, además de analizar la transcripción actual, debes generar un campo "evolucion" que compare el estado actual con la sesión anterior (mejora, estancamiento o empeoramiento del dolor y la función, respuesta al tratamiento, y ajustes recomendados al plan).`;
+Esta es una REVISIÓN, no una primera visita. NO repitas la anamnesis (antecedentes, medicación, edad, deporte ya constan de la primera visita). Céntrate en el CAMBIO respecto a las sesiones anteriores de este episodio.`;
   }
 
   const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada.
@@ -291,17 +345,21 @@ INSTRUCCIONES:
 3. Para tests: usa sensibilidad/especificidad de la KB.
 4. Para recuperacion y tratamiento: usa los protocolos del condition_id identificado.
 5. Si no se menciona algo: usa [] para listas o "No mencionado" para texto.
+${isFollowUp
+  ? `6. SEGUIMIENTO: NO reconstruyas la anamnesis. En historia, los campos antecedentes/medicacion/edad/deporte deben ser "Sin cambios desde la primera visita" salvo que en la transcripción se mencione algo nuevo. Concéntrate en evolucion, objetivos_progreso, diagnostico_seguimiento, fase_tratamiento, tratamiento_hoy y alertas.`
+  : `6. PRIMERA VISITA: realiza una anamnesis completa, un screening exhaustivo de banderas rojas y amarillas, establece objetivos_basales medibles y un pronostico inicial. Sé riguroso: es el momento de máxima recogida de información.`}
 
 Devuelve ÚNICAMENTE este JSON, sin markdown ni texto adicional:
 {
   "historia": {
-    "motivo": "motivo detallado con localización, inicio y características",
+    "motivo": "motivo detallado con localización, inicio, mecanismo lesional y características del dolor (tipo, irradiación, ritmo)",
     "edad": "edad y datos demográficos",
-    "antecedentes": "antecedentes médicos y lesiones previas",
-    "medicacion": "medicación actual",
-    "deporte": "actividad física, nivel, frecuencia",
-    "exploracion": "exploración: postura, ROM, palpación, fuerza, EVA",
-    "tratamiento": "técnicas aplicadas y pautas",
+    "antecedentes": "antecedentes médicos, quirúrgicos y lesiones previas en la zona",
+    "medicacion": "medicación actual relevante",
+    "deporte": "actividad física/laboral, nivel, frecuencia y demandas",
+    "factores_contexto": "trabajo, sueño, estrés, expectativas y objetivos personales del paciente",
+    "exploracion": "exploración: inspección, ROM con grados, palpación, fuerza, hallazgos neurológicos, EVA",
+    "tratamiento": "técnicas aplicadas y pautas en esta sesión",
     "observaciones": "evolución y factores psicosociales"
   },
   "soap": {
@@ -356,10 +414,39 @@ Devuelve ÚNICAMENTE este JSON, sin markdown ni texto adicional:
   }${isFollowUp ? `,
   "evolucion": {
     "tendencia": "mejora|estancamiento|empeoramiento",
-    "resumen": "párrafo comparando el estado actual con la sesión anterior: dolor, función, respuesta al tratamiento",
-    "cambio_eva": "descripción del cambio en el dolor respecto a la sesión anterior",
-    "ajuste_plan": "ajustes recomendados al plan de tratamiento según la evolución observada"
-  }` : ""}
+    "resumen": "párrafo comparando el estado actual con las sesiones anteriores del episodio: dolor, función, respuesta al tratamiento",
+    "cambio_eva": "evolución del dolor con números si los hay (ej. de 6 a 4)",
+    "cambio_funcional": "cambios en ROM, fuerza o capacidad funcional respecto a sesiones previas",
+    "adherencia": "¿ha realizado los ejercicios pautados? ¿cumple el plan? 'No mencionado' si no consta",
+    "respuesta_tratamiento": "qué técnicas/ejercicios están funcionando y cuáles no",
+    "ajuste_plan": "ajustes recomendados al plan según la evolución observada"
+  },
+  "diagnostico_seguimiento": {
+    "confirmado": "se mantiene|revisado",
+    "cambio": "si cambia, nuevo diagnóstico y por qué; si no, 'Se mantiene el diagnóstico inicial'"
+  },
+  "objetivos_progreso": [
+    {"objetivo": "objetivo basal de la primera visita", "estado": "cumplido|en progreso|sin avance|estancado", "nota": "comentario breve"}
+  ],
+  "fase_tratamiento": {
+    "fase_actual": "fase en la que se encuentra ahora",
+    "progresion": "avanza|se mantiene|retrocede — con explicación breve (ej. 'pasa de fase de carga a funcional')"
+  },
+  "tratamiento_hoy": {
+    "aplicado": "qué se ha hecho en la sesión de hoy",
+    "ajuste_plan": "qué cambia para la próxima sesión (progresión de carga, nuevos ejercicios)",
+    "ejercicios_actualizados": ["ejercicio actualizado para casa con dosis"]
+  },
+  "alertas": [
+    "avisos automáticos relevantes: estancamiento si no mejora, posible recaída, abandono de adherencia, o 'considerar derivación si no mejora en X sesiones'. [] si no hay"
+  ]` : `,
+  "objetivos_basales": [
+    {"texto": "objetivo SMART con métrica de partida (ej. reducir EVA de 7 a ≤3 en 6 semanas)", "metrica": "EVA|ROM|fuerza|funcional", "valor_inicial": "valor de partida", "valor_meta": "valor objetivo", "plazo": "plazo estimado"}
+  ],
+  "pronostico": {
+    "valoracion": "favorable|reservado|desfavorable",
+    "razonamiento": "por qué, en una frase, según factores del caso y la KB"
+  }`}
 }
 
 REGLAS:
@@ -421,6 +508,19 @@ REGLAS:
       // keep as-is
     } else {
       parsed.evolucion = null;
+    }
+    // Marcar el tipo de sesión para que el frontend sepa qué mostrar
+    parsed._session_type = isFollowUp ? 'seguimiento' : 'primera_visita';
+    // Normalizar campos específicos de cada tipo
+    if (isFollowUp) {
+      parsed.objetivos_progreso = Array.isArray(parsed.objetivos_progreso) ? parsed.objetivos_progreso : [];
+      parsed.diagnostico_seguimiento = parsed.diagnostico_seguimiento || null;
+      parsed.fase_tratamiento = parsed.fase_tratamiento || null;
+      parsed.tratamiento_hoy = parsed.tratamiento_hoy || null;
+      parsed.alertas = Array.isArray(parsed.alertas) ? parsed.alertas : [];
+    } else {
+      parsed.objetivos_basales = Array.isArray(parsed.objetivos_basales) ? parsed.objetivos_basales : [];
+      parsed.pronostico = parsed.pronostico || null;
     }
 
     // Enriquecer desde KB si hay condition_id válido
@@ -656,6 +756,140 @@ app.delete("/api/account", rateLimit(5, 60_000), async (req, res) => {
   }
 });
 
+// ── Helper: verificar token y devolver el usuario ────────────────────────────
+async function verifyUser(req) {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith('Bearer ')) return null;
+  const token = auth.slice(7);
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) return null;
+  try {
+    const r = await fetch(`${process.env.SUPABASE_URL}/auth/v1/user`, {
+      headers: { 'apikey': process.env.SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${token}` }
+    });
+    const u = await r.json();
+    return u?.id ? u : null;
+  } catch(e) { return null; }
+}
+
+// Cabeceras admin de Supabase (service key — ignora RLS)
+function sbAdmin() {
+  return {
+    'Content-Type': 'application/json',
+    'apikey': process.env.SUPABASE_SERVICE_KEY,
+    'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+  };
+}
+const SB_REST = () => `${process.env.SUPABASE_URL}/rest/v1`;
+
+// ── GET /api/clinic — info de la clínica del usuario (como owner o miembro) ───
+app.get("/api/clinic", rateLimit(30, 60_000), async (req, res) => {
+  const user = await verifyUser(req);
+  if (!user) return res.status(401).json({ error: "No autorizado." });
+  try {
+    // ¿Es miembro de alguna clínica?
+    const memRes = await fetch(`${SB_REST()}/clinic_members?user_id=eq.${user.id}&select=clinic_id,role`, { headers: sbAdmin() });
+    const memberships = await memRes.json();
+    if (!Array.isArray(memberships) || !memberships.length) return res.json({ clinic: null });
+
+    const clinicId = memberships[0].clinic_id;
+    const myRole = memberships[0].role;
+
+    const clinicRes = await fetch(`${SB_REST()}/clinics?id=eq.${clinicId}&select=*`, { headers: sbAdmin() });
+    const clinics = await clinicRes.json();
+    const clinic = clinics?.[0];
+    if (!clinic) return res.json({ clinic: null });
+
+    const allMembersRes = await fetch(`${SB_REST()}/clinic_members?clinic_id=eq.${clinicId}&select=user_id,role,email,name,added_at`, { headers: sbAdmin() });
+    const members = await allMembersRes.json();
+
+    return res.json({ clinic: { ...clinic, myRole, members: Array.isArray(members) ? members : [] } });
+  } catch(e) {
+    console.error('GET clinic error:', e.message);
+    return res.status(500).json({ error: "Error al obtener la clínica." });
+  }
+});
+
+// ── POST /api/clinic/member — invitar (añadir) un fisio por email ─────────────
+app.post("/api/clinic/member", rateLimit(10, 60_000), async (req, res) => {
+  const user = await verifyUser(req);
+  if (!user) return res.status(401).json({ error: "No autorizado." });
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: "Email requerido." });
+
+  try {
+    // 1. Buscar la clínica donde el solicitante es OWNER
+    const clinicRes = await fetch(`${SB_REST()}/clinics?owner_id=eq.${user.id}&select=*`, { headers: sbAdmin() });
+    const clinics = await clinicRes.json();
+    const clinic = clinics?.[0];
+    if (!clinic) return res.status(403).json({ error: "Solo el propietario de una clínica puede añadir miembros." });
+
+    // 2. Comprobar límite de plazas
+    const membersRes = await fetch(`${SB_REST()}/clinic_members?clinic_id=eq.${clinic.id}&select=user_id`, { headers: sbAdmin() });
+    const members = await membersRes.json();
+    if (Array.isArray(members) && members.length >= clinic.seats) {
+      return res.status(403).json({ error: `Has alcanzado el límite de ${clinic.seats} fisioterapeutas. Amplía las plazas para añadir más.` });
+    }
+
+    // 3. Buscar al usuario invitado por email
+    const invitedId = await resolveUserId('', email);
+    if (!invitedId) return res.status(404).json({ error: "No existe ningún usuario de FisioScript con ese email. Pídele que se registre primero." });
+
+    // 4. Datos del invitado (nombre)
+    const invitedRes = await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${invitedId}`, { headers: sbAdmin() });
+    const invited = await invitedRes.json();
+    const invitedName = invited?.user_metadata?.name || email.split('@')[0];
+
+    // 5. Insertar miembro (upsert para evitar duplicados)
+    const insRes = await fetch(`${SB_REST()}/clinic_members`, {
+      method: 'POST',
+      headers: { ...sbAdmin(), 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify({ clinic_id: clinic.id, user_id: invitedId, role: 'member', email, name: invitedName }),
+    });
+    if (!insRes.ok) {
+      const t = await insRes.text();
+      console.error('Insert member error:', t.slice(0,200));
+      return res.status(500).json({ error: "No se pudo añadir el miembro." });
+    }
+
+    // 6. Marcar el plan del invitado como clinica (para que pase el muro de acceso)
+    try { await updateUserPlan(invitedId, clinic.plan); } catch(e) {}
+
+    return res.json({ ok: true, member: { user_id: invitedId, email, name: invitedName, role: 'member' } });
+  } catch(e) {
+    console.error('Add member error:', e.message);
+    return res.status(500).json({ error: "Error al añadir el miembro." });
+  }
+});
+
+// ── DELETE /api/clinic/member — quitar un fisio ──────────────────────────────
+app.delete("/api/clinic/member", rateLimit(10, 60_000), async (req, res) => {
+  const user = await verifyUser(req);
+  if (!user) return res.status(401).json({ error: "No autorizado." });
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: "userId requerido." });
+
+  try {
+    const clinicRes = await fetch(`${SB_REST()}/clinics?owner_id=eq.${user.id}&select=*`, { headers: sbAdmin() });
+    const clinics = await clinicRes.json();
+    const clinic = clinics?.[0];
+    if (!clinic) return res.status(403).json({ error: "Solo el propietario puede quitar miembros." });
+    if (userId === user.id) return res.status(400).json({ error: "El propietario no puede quitarse a sí mismo." });
+
+    const delRes = await fetch(`${SB_REST()}/clinic_members?clinic_id=eq.${clinic.id}&user_id=eq.${userId}`, {
+      method: 'DELETE', headers: sbAdmin(),
+    });
+    if (!delRes.ok) return res.status(500).json({ error: "No se pudo quitar el miembro." });
+
+    // Devolver al usuario quitado a plan trial cancelado
+    try { await updateUserPlan(userId, 'cancelled'); } catch(e) {}
+
+    return res.json({ ok: true });
+  } catch(e) {
+    console.error('Remove member error:', e.message);
+    return res.status(500).json({ error: "Error al quitar el miembro." });
+  }
+});
+
 // ── POST /api/stripe/portal ───────────────────────────────────────────────────
 app.post("/api/stripe/portal", rateLimit(10, 60_000), async (req, res) => {
   if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
@@ -800,6 +1034,46 @@ async function updateUserPlan(userId, plan) {
   });
 }
 
+// Crea la clínica del owner si no existe y lo añade como miembro 'owner'.
+async function ensureClinic(ownerId, email, plan, seats) {
+  const rest = `${process.env.SUPABASE_URL}/rest/v1`;
+  const headers = sbAdmin();
+
+  // ¿Ya tiene una clínica como owner?
+  const existRes = await fetch(`${rest}/clinics?owner_id=eq.${ownerId}&select=id`, { headers });
+  const exist = await existRes.json();
+  let clinicId = exist?.[0]?.id;
+
+  if (!clinicId) {
+    const createRes = await fetch(`${rest}/clinics`, {
+      method: 'POST',
+      headers: { ...headers, 'Prefer': 'return=representation' },
+      body: JSON.stringify({ owner_id: ownerId, plan, seats: seats || 5, name: 'Mi clínica' }),
+    });
+    const created = await createRes.json();
+    clinicId = created?.[0]?.id;
+    console.log(`✓ Clínica creada: ${clinicId} (owner ${email}, ${seats} plazas)`);
+  } else {
+    // Actualizar plan y plazas
+    await fetch(`${rest}/clinics?id=eq.${clinicId}`, {
+      method: 'PATCH', headers,
+      body: JSON.stringify({ plan, seats: seats || 5 }),
+    });
+  }
+
+  if (!clinicId) return;
+
+  // Añadir al owner como miembro (upsert)
+  const ownerRes = await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${ownerId}`, { headers });
+  const owner = await ownerRes.json();
+  const ownerName = owner?.user_metadata?.name || email.split('@')[0];
+  await fetch(`${rest}/clinic_members`, {
+    method: 'POST',
+    headers: { ...headers, 'Prefer': 'resolution=merge-duplicates' },
+    body: JSON.stringify({ clinic_id: clinicId, user_id: ownerId, role: 'owner', email, name: ownerName }),
+  });
+}
+
 // ── POST /api/stripe/webhook ──────────────────────────────────────────────────
 app.post("/api/stripe/webhook", async (req, res) => {
   if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
@@ -825,6 +1099,14 @@ app.post("/api/stripe/webhook", async (req, res) => {
           if (userId) {
             await updateUserPlan(userId, plan);
             console.log(`✓ Plan actualizado en Supabase: ${userId} → ${plan}`);
+
+            // Si es un plan clínica, crear la clínica y añadir al owner (si no existe ya)
+            if (plan === 'clinica_mensual' || plan === 'clinica_anual') {
+              try {
+                const extraSeats = parseInt(session.metadata?.extra_seats || '0') || 0;
+                await ensureClinic(userId, email, plan, 5 + extraSeats);
+              } catch(e) { console.error('Error creando clínica:', e.message); }
+            }
           } else {
             console.warn(`⚠ Usuario no encontrado (userId: ${metaUserId}, email: ${email})`);
           }
