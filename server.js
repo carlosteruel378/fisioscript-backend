@@ -538,6 +538,70 @@ ${sessions.slice(0, 6000)}`;
   }
 });
 
+// ── POST /api/derivacion — informe formal de derivación a especialista ────────
+app.post("/api/derivacion", rateLimit(15, 60_000), async (req, res) => {
+  const { patient, sessions, totalSessions, especialista, motivo } = req.body || {};
+  if (!sessions || typeof sessions !== "string") return res.status(400).json({ error: "Faltan datos de sesiones." });
+  if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
+
+  const esp = especialista || "Traumatología";
+
+  const prompt = `Eres un fisioterapeuta colegiado redactando un INFORME DE DERIVACIÓN formal para remitir a un paciente a un médico especialista (${esp}). A partir del historial clínico, redacta el cuerpo del informe en lenguaje médico profesional, objetivo y conciso.
+
+Devuelve EXCLUSIVAMENTE un objeto JSON válido (sin texto adicional, sin markdown) con esta estructura:
+{
+  "resumen_clinico": "2-4 frases: motivo inicial de consulta, tiempo de evolución y curso clínico observado a lo largo de las sesiones",
+  "hallazgos_relevantes": ["hallazgo objetivo 1 (tests positivos, signos)", "hallazgo 2", "..."],
+  "tratamiento_realizado": "1-2 frases: qué tratamiento de fisioterapia se ha aplicado y durante cuánto",
+  "respuesta_tratamiento": "1-2 frases: cómo ha respondido el paciente (mejoría, estancamiento, empeoramiento)",
+  "motivo_derivacion": "1-2 frases: por qué se deriva y qué se solicita al especialista (valoración, prueba de imagen, etc.)",
+  "sospecha_diagnostica": "impresión diagnóstica del fisioterapeuta, indicando que es orientativa"
+}
+
+No inventes datos que no estén en el historial. Si falta información para un campo, déjalo breve o indica "No consta".
+
+Especialista destino: ${esp}
+${motivo ? `Motivo indicado por el fisioterapeuta: ${motivo}` : ''}
+Paciente: ${patient||'—'} (${totalSessions||0} sesiones)
+Historial clínico:
+${sessions.slice(0, 6000)}`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.3,
+        max_tokens: 900,
+        response_format: { type: "json_object" },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!response.ok) {
+      if (response.status === 429) return res.status(429).json({ error: "Servicio saturado." });
+      return res.status(502).json({ error: "Error al procesar con IA." });
+    }
+    const data = await response.json();
+    let parsed;
+    try {
+      parsed = JSON.parse(data.choices?.[0]?.message?.content || "{}");
+    } catch(e) {
+      return res.status(502).json({ error: "Respuesta de IA no válida." });
+    }
+    return res.json({ derivacion: parsed });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === "AbortError") return res.status(504).json({ error: "La IA tardó demasiado." });
+    console.error("Error derivacion:", err.message);
+    return res.status(500).json({ error: "Error interno." });
+  }
+});
+
 // ── GET /api/clinical/condition/:id ──────────────────────────────────────────
 app.get("/api/clinical/condition/:id", (req, res) => {
   const cid = req.params.id;
