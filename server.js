@@ -74,6 +74,7 @@ app.use(cors({
 }));
 
 app.use("/api/stripe/webhook", express.raw({ type: "application/json" }));
+app.use("/api/transcribe", express.raw({ type: "application/octet-stream", limit: "50mb" }));
 app.use(express.json({ limit: "1mb" }));
 
 app.use((req, res, next) => {
@@ -183,6 +184,60 @@ function getRegionProtocols(rid) {
 }
 
 const COMPACT_CONTEXT = buildCompactContext();
+
+// ── POST /api/transcribe — Whisper (Groq) ─────────────────────────────────────
+// Recibe audio binario (webm/opus), lo transcribe con Whisper y devuelve el texto.
+// El audio NO se almacena: se procesa en memoria y se descarta.
+app.post("/api/transcribe", rateLimit(20, 60_000), async (req, res) => {
+  if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
+  const audioBuffer = req.body;
+  if (!audioBuffer || !audioBuffer.length) return res.status(400).json({ error: "No se recibió audio." });
+  if (audioBuffer.length < 2000) return res.status(400).json({ error: "Audio demasiado corto." });
+  if (audioBuffer.length > 45 * 1024 * 1024) return res.status(400).json({ error: "Audio demasiado largo." });
+
+  const lang = (req.query.lang === 'en') ? 'en' : 'es';
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60_000);
+
+  try {
+    // Construir multipart/form-data para Groq (FormData/Blob nativos en Node 18+)
+    const form = new FormData();
+    form.append("file", new Blob([audioBuffer], { type: "audio/webm" }), "consulta.webm");
+    form.append("model", "whisper-large-v3-turbo");
+    form.append("language", lang);
+    form.append("temperature", "0");
+    form.append("response_format", "json");
+    // Prompt para mejorar terminología clínica de fisioterapia
+    form.append("prompt", lang === 'es'
+      ? "Consulta de fisioterapia. Terminología clínica: lumbalgia, cervicalgia, tendinopatía, manguito rotador, isquiotibiales, propiocepción, dorsiflexión, EVA, ROM."
+      : "Physiotherapy consultation. Clinical terminology.");
+
+    const response = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
+      body: form,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      console.error("Whisper error:", response.status, errText.slice(0, 200));
+      if (response.status === 429) return res.status(429).json({ error: "Servicio de transcripción saturado. Inténtalo en unos segundos." });
+      return res.status(502).json({ error: "Error al transcribir el audio." });
+    }
+
+    const data = await response.json();
+    const text = (data.text || "").trim();
+    return res.json({ text });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === "AbortError") return res.status(504).json({ error: "La transcripción tardó demasiado." });
+    console.error("Transcribe error:", err.message);
+    return res.status(500).json({ error: "Error al transcribir." });
+  }
+});
 
 // ── POST /api/generate ────────────────────────────────────────────────────────
 app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
