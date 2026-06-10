@@ -1266,11 +1266,31 @@ async function ensureClinic(ownerId, email, plan, seats, stripeSubId, stripeCust
   let clinicId = exist?.[0]?.id;
 
   if (!clinicId) {
-    const createRes = await fetch(`${rest}/clinics`, {
+    let createRes = await fetch(`${rest}/clinics`, {
       method: 'POST',
       headers: { ...headers, 'Prefer': 'return=representation' },
       body: JSON.stringify({ owner_id: ownerId, plan, seats: seats || 5, name: 'Mi clínica', ...stripeFields }),
     });
+    if (!createRes.ok) {
+      const errTxt = await createRes.text().catch(()=> '');
+      console.error('✗ Error creando clínica:', createRes.status, errTxt.slice(0, 300));
+      // Si fallan las columnas de Stripe (ALTER no ejecutado), reintentar sin ellas
+      if (errTxt.includes('column') && (errTxt.includes('stripe_subscription_id') || errTxt.includes('stripe_customer_id'))) {
+        console.warn('⚠ Reintentando sin columnas stripe_* (falta ejecutar el ALTER TABLE en Supabase)');
+        createRes = await fetch(`${rest}/clinics`, {
+          method: 'POST',
+          headers: { ...headers, 'Prefer': 'return=representation' },
+          body: JSON.stringify({ owner_id: ownerId, plan, seats: seats || 5, name: 'Mi clínica' }),
+        });
+        if (!createRes.ok) {
+          const e2 = await createRes.text().catch(()=> '');
+          console.error('✗ Error creando clínica (reintento):', createRes.status, e2.slice(0, 300));
+          return;
+        }
+      } else {
+        return;
+      }
+    }
     const created = await createRes.json();
     clinicId = created?.[0]?.id;
     console.log(`✓ Clínica creada: ${clinicId} (owner ${email}, ${seats} plazas)`);
