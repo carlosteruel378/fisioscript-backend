@@ -806,6 +806,8 @@ app.get("/api/prices", (req, res) => {
   res.json({
     individual_mensual: PRICE_IDS.individual_mensual,
     individual_anual:   PRICE_IDS.individual_anual,
+    clinica_mensual:    PRICE_IDS.clinica_mensual,
+    clinica_anual:      PRICE_IDS.clinica_anual,
   });
 });
 
@@ -823,6 +825,21 @@ app.delete("/api/account", rateLimit(5, 60_000), async (req, res) => {
     });
     const user = await verifyRes.json();
     if (!user?.id) return res.status(401).json({ error: "Token inválido." });
+
+    // Registrar el trial consumido ANTES de borrar (anti-abuso: que no pueda
+    // re-registrarse con el mismo email y obtener otra prueba gratuita)
+    try {
+      const email = (user.email || '').toLowerCase().trim();
+      const trialStart = user.user_metadata?.trial_start || user.created_at;
+      if (email) {
+        await fetch(`${process.env.SUPABASE_URL}/rest/v1/used_trials`, {
+          method: 'POST',
+          headers: { ...sbAdmin(), 'Prefer': 'resolution=ignore-duplicates' },
+          body: JSON.stringify({ email, trial_start: trialStart }),
+        });
+      }
+    } catch(e) { /* no bloquear el borrado por esto */ }
+
     // Delete user from Supabase
     const deleteRes = await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${user.id}`, {
       method: 'DELETE',
@@ -834,6 +851,60 @@ app.delete("/api/account", rateLimit(5, 60_000), async (req, res) => {
   } catch(e) {
     console.error('Delete account error:', e.message);
     return res.status(500).json({ error: "Error al eliminar la cuenta." });
+  }
+});
+
+// ── POST /api/trial/verify — anti-abuso de pruebas gratuitas ──────────────────
+// Registra la primera vez que un email inicia un trial. Si el email ya consumió
+// un trial antes (aunque borrara la cuenta), restaura la fecha de inicio ORIGINAL
+// en sus metadatos, de modo que no obtiene días gratis de nuevo.
+app.post("/api/trial/verify", rateLimit(20, 60_000), async (req, res) => {
+  const user = await verifyUser(req);
+  if (!user) return res.status(401).json({ error: "No autorizado." });
+
+  const email = (user.email || '').toLowerCase().trim();
+  const currentStart = user.user_metadata?.trial_start || user.created_at;
+  if (!email) return res.json({ trial_start: currentStart });
+
+  try {
+    // ¿Este email ya consumió un trial?
+    const lookupRes = await fetch(
+      `${SB_REST()}/used_trials?email=eq.${encodeURIComponent(email)}&select=trial_start`,
+      { headers: sbAdmin() }
+    );
+    const rows = await lookupRes.json();
+    const stored = Array.isArray(rows) && rows[0]?.trial_start;
+
+    if (!stored) {
+      // Primera vez: registrar el inicio del trial
+      await fetch(`${SB_REST()}/used_trials`, {
+        method: 'POST',
+        headers: { ...sbAdmin(), 'Prefer': 'resolution=ignore-duplicates' },
+        body: JSON.stringify({ email, trial_start: currentStart }),
+      });
+      return res.json({ trial_start: currentStart });
+    }
+
+    // Ya existía: si la fecha actual del usuario es más reciente que la original
+    // (se re-registró), restaurar la fecha original en sus metadatos.
+    if (new Date(currentStart) > new Date(stored)) {
+      try {
+        const r = await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${user.id}`, { headers: sbAdmin() });
+        const u = await r.json();
+        const existing = u?.user_metadata || {};
+        await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${user.id}`, {
+          method: 'PUT',
+          headers: sbAdmin(),
+          body: JSON.stringify({ user_metadata: { ...existing, trial_start: stored } }),
+        });
+        console.log(`⚠ Trial reutilizado detectado: ${email} → restaurada fecha original ${stored}`);
+      } catch(e) { /* devolver la fecha igualmente */ }
+    }
+    return res.json({ trial_start: stored });
+  } catch(e) {
+    console.error('Trial verify error:', e.message);
+    // Ante error, no bloquear al usuario: devolver su fecha actual
+    return res.json({ trial_start: currentStart });
   }
 });
 
@@ -971,6 +1042,76 @@ app.delete("/api/clinic/member", rateLimit(10, 60_000), async (req, res) => {
   }
 });
 
+// ── POST /api/clinic/seats — ampliar plazas (+5€/mes por fisio extra) ─────────
+// Modifica la suscripción de Stripe añadiendo (o incrementando) el item de plaza
+// extra, con prorrateo automático, y actualiza el límite en la base de datos.
+app.post("/api/clinic/seats", rateLimit(10, 60_000), async (req, res) => {
+  if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
+  const user = await verifyUser(req);
+  if (!user) return res.status(401).json({ error: "No autorizado." });
+
+  const EXTRA_SEAT_PRICE = process.env.PRICE_EXTRA_SEAT || 'price_1Tcit7POSeyVBgtaC7CSaSJs';
+
+  try {
+    // 1. Verificar que es owner de una clínica
+    const clinicRes = await fetch(`${SB_REST()}/clinics?owner_id=eq.${user.id}&select=*`, { headers: sbAdmin() });
+    const clinics = await clinicRes.json();
+    const clinic = clinics?.[0];
+    if (!clinic) return res.status(403).json({ error: "Solo el propietario de la clínica puede ampliar plazas." });
+
+    // 2. Localizar la suscripción de Stripe
+    let subId = clinic.stripe_subscription_id;
+    if (!subId) {
+      // Fallback: buscar por email del owner
+      const customers = await stripe.customers.list({ email: user.email, limit: 1 });
+      if (customers.data.length) {
+        const subs = await stripe.subscriptions.list({ customer: customers.data[0].id, status: 'active', limit: 1 });
+        subId = subs.data[0]?.id || null;
+        // Guardar para la próxima
+        if (subId) {
+          await fetch(`${SB_REST()}/clinics?id=eq.${clinic.id}`, {
+            method: 'PATCH', headers: sbAdmin(),
+            body: JSON.stringify({ stripe_subscription_id: subId, stripe_customer_id: customers.data[0].id }),
+          });
+        }
+      }
+    }
+    if (!subId) return res.status(404).json({ error: "No se encontró la suscripción de Stripe de la clínica. Contacta con soporte." });
+
+    // 3. Modificar la suscripción: incrementar el item de plaza extra o añadirlo
+    const sub = await stripe.subscriptions.retrieve(subId);
+    if (!sub || sub.status !== 'active') return res.status(400).json({ error: "La suscripción no está activa." });
+
+    const extraItem = sub.items.data.find(it => it.price?.id === EXTRA_SEAT_PRICE);
+    if (extraItem) {
+      await stripe.subscriptionItems.update(extraItem.id, {
+        quantity: (extraItem.quantity || 0) + 1,
+        proration_behavior: 'create_prorations',
+      });
+    } else {
+      await stripe.subscriptionItems.create({
+        subscription: subId,
+        price: EXTRA_SEAT_PRICE,
+        quantity: 1,
+        proration_behavior: 'create_prorations',
+      });
+    }
+
+    // 4. Incrementar las plazas en la base de datos
+    const newSeats = (clinic.seats || 5) + 1;
+    await fetch(`${SB_REST()}/clinics?id=eq.${clinic.id}`, {
+      method: 'PATCH', headers: sbAdmin(),
+      body: JSON.stringify({ seats: newSeats }),
+    });
+
+    console.log(`✓ Plazas ampliadas: clínica ${clinic.id} → ${newSeats} (sub ${subId})`);
+    return res.json({ ok: true, seats: newSeats });
+  } catch(e) {
+    console.error('Expand seats error:', e.message);
+    return res.status(500).json({ error: "Error al ampliar las plazas: " + e.message });
+  }
+});
+
 // ── POST /api/stripe/portal ───────────────────────────────────────────────────
 app.post("/api/stripe/portal", rateLimit(10, 60_000), async (req, res) => {
   if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
@@ -999,9 +1140,8 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
   const { priceId, email, extraSeats, userId } = req.body;
   if (!priceId) return res.status(400).json({ error: "priceId requerido." });
 
-  // Price IDs para profesionales extra (+5€/mes cada uno)
-  const EXTRA_SEAT_PRICE_MONTHLY = 'price_1Tcit7POSeyVBgtaC7CSaSJs';
-  const EXTRA_SEAT_PRICE_ANNUAL  = 'price_1Tcit7POSeyVBgtaC7CSaSJs';
+  // Price ID para profesionales extra (+5€/mes cada uno) — configurable por env var
+  const EXTRA_SEAT_PRICE = process.env.PRICE_EXTRA_SEAT || 'price_1Tcit7POSeyVBgtaC7CSaSJs';
 
   // Detectar si es plan anual
   const isAnual   = priceId === PRICE_IDS.individual_anual  || priceId === PRICE_IDS.clinica_anual;
@@ -1012,12 +1152,8 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
 
   // Añadir profesionales extra si es plan clínica y se solicitan
   const seats = parseInt(extraSeats) || 0;
-  if (isClinica && seats > 0 && seats <= 20) {
-    const extraPriceId = isAnual ? EXTRA_SEAT_PRICE_ANNUAL : EXTRA_SEAT_PRICE_MONTHLY;
-    // Solo añadir si el price ID extra está configurado (no es placeholder)
-    if (!extraPriceId.includes('XXXX') && !extraPriceId.includes('YYYY')) {
-      lineItems.push({ price: extraPriceId, quantity: seats });
-    }
+  if (isClinica && seats > 0 && seats <= 20 && EXTRA_SEAT_PRICE) {
+    lineItems.push({ price: EXTRA_SEAT_PRICE, quantity: seats });
   }
 
   try {
@@ -1116,9 +1252,13 @@ async function updateUserPlan(userId, plan) {
 }
 
 // Crea la clínica del owner si no existe y lo añade como miembro 'owner'.
-async function ensureClinic(ownerId, email, plan, seats) {
+async function ensureClinic(ownerId, email, plan, seats, stripeSubId, stripeCustomerId) {
   const rest = `${process.env.SUPABASE_URL}/rest/v1`;
   const headers = sbAdmin();
+
+  const stripeFields = {};
+  if (stripeSubId) stripeFields.stripe_subscription_id = stripeSubId;
+  if (stripeCustomerId) stripeFields.stripe_customer_id = stripeCustomerId;
 
   // ¿Ya tiene una clínica como owner?
   const existRes = await fetch(`${rest}/clinics?owner_id=eq.${ownerId}&select=id`, { headers });
@@ -1129,16 +1269,16 @@ async function ensureClinic(ownerId, email, plan, seats) {
     const createRes = await fetch(`${rest}/clinics`, {
       method: 'POST',
       headers: { ...headers, 'Prefer': 'return=representation' },
-      body: JSON.stringify({ owner_id: ownerId, plan, seats: seats || 5, name: 'Mi clínica' }),
+      body: JSON.stringify({ owner_id: ownerId, plan, seats: seats || 5, name: 'Mi clínica', ...stripeFields }),
     });
     const created = await createRes.json();
     clinicId = created?.[0]?.id;
     console.log(`✓ Clínica creada: ${clinicId} (owner ${email}, ${seats} plazas)`);
   } else {
-    // Actualizar plan y plazas
+    // Actualizar plan, plazas y datos de Stripe
     await fetch(`${rest}/clinics?id=eq.${clinicId}`, {
       method: 'PATCH', headers,
-      body: JSON.stringify({ plan, seats: seats || 5 }),
+      body: JSON.stringify({ plan, seats: seats || 5, ...stripeFields }),
     });
   }
 
@@ -1185,7 +1325,7 @@ app.post("/api/stripe/webhook", async (req, res) => {
             if (plan === 'clinica_mensual' || plan === 'clinica_anual') {
               try {
                 const extraSeats = parseInt(session.metadata?.extra_seats || '0') || 0;
-                await ensureClinic(userId, email, plan, 5 + extraSeats);
+                await ensureClinic(userId, email, plan, 5 + extraSeats, session.subscription || null, session.customer || null);
               } catch(e) { console.error('Error creando clínica:', e.message); }
             }
           } else {
