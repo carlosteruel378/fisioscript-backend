@@ -702,6 +702,87 @@ ${sessions.slice(0, 6000)}`;
   }
 });
 
+// ── POST /api/rehipotesis — recalcular hipótesis con tests confirmados ────────
+app.post("/api/rehipotesis", rateLimit(15, 60_000), async (req, res) => {
+  const { text, tests } = req.body || {};
+  if (!text || typeof text !== "string") return res.status(400).json({ error: "El campo 'text' es requerido." });
+  if (text.length > 15_000) return res.status(400).json({ error: "Texto demasiado largo." });
+  if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
+
+  // Resumen de los tests marcados por el fisio
+  const testsTxt = Array.isArray(tests) && tests.length
+    ? tests.map(t => `${t.nombre || ''}: ${t.resultado || ''}${t.sensibilidad ? ` (Se ${t.sensibilidad}, Sp ${t.especificidad || '—'})` : ''}`).join('\n')
+    : '';
+
+  const detectedRegion = detectRegion(text);
+  const regionProtocol = getRegionProtocols(detectedRegion);
+
+  const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada.
+
+${buildCompactContext()}${regionProtocol}
+
+TAREA: El fisioterapeuta ha COMPLETADO la exploración física y ha confirmado los resultados de los tests clínicos. Recalcula la hipótesis diagnóstica dando MÁXIMO PESO a los resultados de los tests confirmados (su sensibilidad y especificidad determinan cuánto modifican la probabilidad), junto con los signos y síntomas de la historia.
+
+TESTS CONFIRMADOS POR EL FISIOTERAPEUTA:
+${testsTxt || 'Ninguno'}
+
+Devuelve ÚNICAMENTE este JSON, sin markdown ni texto adicional:
+{
+  "hipotesis": {
+    "principal": "diagnóstico más probable tras integrar los tests (nombre exacto de la base de datos si coincide)",
+    "condition_id": "id exacto de la base de datos o null",
+    "confianza": 0.75,
+    "razonamiento": "razonamiento clínico explicando cómo los tests confirmados modifican la hipótesis: qué confirman, qué descartan",
+    "diferenciales": [
+      {"nombre": "diferencial 1", "probabilidad": 30, "condition_id": "id o null"},
+      {"nombre": "diferencial 2", "probabilidad": 15, "condition_id": "id o null"}
+    ]
+  }
+}
+
+REGLAS:
+- Un test con alta especificidad (>85%) positivo CONFIRMA fuertemente la estructura que evalúa.
+- Un test con alta sensibilidad (>85%) negativo DESCARTA fuertemente la condición.
+- confianza: 0.0-1.0. Los tests confirmados deben moverla significativamente respecto a una valoración solo verbal.
+- El principal puede CAMBIAR si los tests apoyan más a un diferencial.`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: `Historia clínica y tests:\n\n${text}` },
+        ],
+        temperature: 0.1,
+        max_tokens: 1200,
+        response_format: { type: "json_object" },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!response.ok) {
+      if (response.status === 429) return res.status(429).json({ error: "Servicio saturado. Inténtalo en unos segundos." });
+      return res.status(502).json({ error: "Error al procesar con IA." });
+    }
+    const data = await response.json();
+    let parsed;
+    try { parsed = JSON.parse(data.choices?.[0]?.message?.content || "{}"); }
+    catch(e) { return res.status(502).json({ error: "Respuesta de IA no válida." }); }
+    if (!parsed.hipotesis) return res.status(502).json({ error: "Respuesta incompleta de la IA." });
+    return res.json({ hipotesis: parsed.hipotesis });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (err.name === "AbortError") return res.status(504).json({ error: "La IA tardó demasiado." });
+    console.error("Rehipotesis error:", err.message);
+    return res.status(500).json({ error: "Error interno." });
+  }
+});
+
 // ── GET /api/clinical/condition/:id ──────────────────────────────────────────
 app.get("/api/clinical/condition/:id", (req, res) => {
   const cid = req.params.id;
