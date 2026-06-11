@@ -941,7 +941,11 @@ app.get("/api/clinic", rateLimit(30, 60_000), async (req, res) => {
     // ¿Es miembro de alguna clínica?
     const memRes = await fetch(`${SB_REST()}/clinic_members?user_id=eq.${user.id}&select=clinic_id,role`, { headers: sbAdmin() });
     const memberships = await memRes.json();
-    if (!Array.isArray(memberships) || !memberships.length) return res.json({ clinic: null });
+    if (!memRes.ok || !Array.isArray(memberships)) {
+      console.error('✗ GET /api/clinic — error consultando clinic_members:', memRes.status, JSON.stringify(memberships).slice(0, 200));
+      return res.json({ clinic: null });
+    }
+    if (!memberships.length) return res.json({ clinic: null });
 
     const clinicId = memberships[0].clinic_id;
     const myRole = memberships[0].role;
@@ -1308,11 +1312,17 @@ async function ensureClinic(ownerId, email, plan, seats, stripeSubId, stripeCust
   const ownerRes = await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${ownerId}`, { headers });
   const owner = await ownerRes.json();
   const ownerName = owner?.user_metadata?.name || email.split('@')[0];
-  await fetch(`${rest}/clinic_members`, {
+  const memberRes = await fetch(`${rest}/clinic_members`, {
     method: 'POST',
     headers: { ...headers, 'Prefer': 'resolution=merge-duplicates' },
     body: JSON.stringify({ clinic_id: clinicId, user_id: ownerId, role: 'owner', email, name: ownerName }),
   });
+  if (!memberRes.ok) {
+    const errTxt = await memberRes.text().catch(()=> '');
+    console.error('✗ Error añadiendo owner como miembro:', memberRes.status, errTxt.slice(0, 300));
+  } else {
+    console.log(`✓ Owner añadido como miembro de la clínica ${clinicId}`);
+  }
 }
 
 // ── POST /api/stripe/webhook ──────────────────────────────────────────────────
