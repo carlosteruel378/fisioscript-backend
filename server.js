@@ -4,6 +4,7 @@ import Stripe from "stripe";
 import "dotenv/config";
 
 const app = express();
+app.set('trust proxy', 1); // Railway: req.ip = IP real del cliente, no la del proxy
 const PORT = process.env.PORT || 3001;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -37,11 +38,24 @@ const PLAN_MAP = Object.fromEntries(
 const rateLimitMap = new Map();
 function rateLimit(maxReqs, windowMs) {
   return (req, res, next) => {
-    const ip = req.ip || req.connection.remoteAddress;
+    // Clave por usuario autenticado (token) o por IP real (trust proxy activado)
+    const auth = req.headers.authorization || '';
+    const key = auth.length > 30 ? 'u:' + auth.slice(-32) : 'ip:' + (req.ip || req.connection.remoteAddress);
     const now = Date.now();
-    const reqs = (rateLimitMap.get(ip) || []).filter(t => t > now - windowMs);
+    const reqs = (rateLimitMap.get(key) || []).filter(t => t > now - windowMs);
     if (reqs.length >= maxReqs) return res.status(429).json({ error: "Demasiadas peticiones. Espera un momento." });
-    reqs.push(now); rateLimitMap.set(ip, reqs); next();
+    reqs.push(now); rateLimitMap.set(key, reqs); next();
+  };
+}
+
+// Middleware: exige un token de sesión válido de Supabase.
+// Protege los endpoints de IA del uso por terceros (robo de cuota/coste).
+function requireAuth() {
+  return async (req, res, next) => {
+    const user = await verifyUser(req);
+    if (!user) return res.status(401).json({ error: "No autorizado. Inicia sesión." });
+    req.user = user;
+    next();
   };
 }
 
@@ -53,8 +67,8 @@ app.use((req, res, next) => {
 });
 
 const allowedOrigins = [
-  "http://localhost:3000","http://localhost:5500",
-  "http://127.0.0.1:5500","http://127.0.0.1:3000",
+  "http://localhost:3000","http://localhost:5500","http://localhost:8000","http://localhost:8080",
+  "http://127.0.0.1:5500","http://127.0.0.1:3000","http://127.0.0.1:8000","http://127.0.0.1:8080",
   "https://fisioscript.com",
   "https://www.fisioscript.com",
   "https://fisioscript.pages.dev",
@@ -188,7 +202,7 @@ const COMPACT_CONTEXT = buildCompactContext();
 // ── POST /api/transcribe — Whisper (Groq) ─────────────────────────────────────
 // Recibe audio binario (webm/opus), lo transcribe con Whisper y devuelve el texto.
 // El audio NO se almacena: se procesa en memoria y se descarta.
-app.post("/api/transcribe", rateLimit(20, 60_000), async (req, res) => {
+app.post("/api/transcribe", rateLimit(20, 60_000), requireAuth(), async (req, res) => {
   if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
   const audioBuffer = req.body;
   if (!audioBuffer || !audioBuffer.length) return res.status(400).json({ error: "No se recibió audio." });
@@ -264,7 +278,7 @@ app.post("/api/transcribe", rateLimit(20, 60_000), async (req, res) => {
 });
 
 // ── POST /api/generate ────────────────────────────────────────────────────────
-app.post("/api/generate", rateLimit(20, 60_000), async (req, res) => {
+app.post("/api/generate", rateLimit(20, 60_000), requireAuth(), async (req, res) => {
   const { text, lang, previous_session, episode, session_type } = req.body;
   const isEN = lang === 'en';
   if (!text || typeof text !== "string") return res.status(400).json({ error: isEN ? "Field 'text' is required." : "El campo 'text' es requerido." });
@@ -597,7 +611,7 @@ REGLAS:
 });
 
 // ── POST /api/evolucion — resumen de evolución del paciente ───────────────────
-app.post("/api/evolucion", rateLimit(15, 60_000), async (req, res) => {
+app.post("/api/evolucion", rateLimit(15, 60_000), requireAuth(), async (req, res) => {
   const { patient, sessions, totalSessions } = req.body || {};
   if (!sessions || typeof sessions !== "string") return res.status(400).json({ error: "Faltan datos de sesiones." });
   if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
@@ -639,7 +653,7 @@ ${sessions.slice(0, 6000)}`;
 });
 
 // ── POST /api/derivacion — informe formal de derivación a especialista ────────
-app.post("/api/derivacion", rateLimit(15, 60_000), async (req, res) => {
+app.post("/api/derivacion", rateLimit(15, 60_000), requireAuth(), async (req, res) => {
   const { patient, sessions, totalSessions, especialista, motivo } = req.body || {};
   if (!sessions || typeof sessions !== "string") return res.status(400).json({ error: "Faltan datos de sesiones." });
   if (!process.env.GROQ_API_KEY) return res.status(500).json({ error: "Server not configured." });
@@ -703,7 +717,7 @@ ${sessions.slice(0, 6000)}`;
 });
 
 // ── POST /api/rehipotesis — recalcular hipótesis con tests confirmados ────────
-app.post("/api/rehipotesis", rateLimit(15, 60_000), async (req, res) => {
+app.post("/api/rehipotesis", rateLimit(15, 60_000), requireAuth(), async (req, res) => {
   const { text, tests } = req.body || {};
   if (!text || typeof text !== "string") return res.status(400).json({ error: "El campo 'text' es requerido." });
   if (text.length > 15_000) return res.status(400).json({ error: "Texto demasiado largo." });
@@ -784,7 +798,7 @@ REGLAS:
 });
 
 // ── GET /api/clinical/condition/:id ──────────────────────────────────────────
-app.get("/api/clinical/condition/:id", (req, res) => {
+app.get("/api/clinical/condition/:id", requireAuth(), (req, res) => {
   const cid = req.params.id;
   const cond = conditionMap[cid];
   if (!cond) return res.status(404).json({ error: "Condición no encontrada." });
@@ -793,7 +807,7 @@ app.get("/api/clinical/condition/:id", (req, res) => {
 });
 
 // ── GET /api/clinical/region/:id ─────────────────────────────────────────────
-app.get("/api/clinical/region/:id", (req, res) => {
+app.get("/api/clinical/region/:id", requireAuth(), (req, res) => {
   const rid = req.params.id;
   const conditions = CLINICAL_KB.conditions.filter(c => c.r === rid);
   const tests = testsByRegion[rid] || [];
