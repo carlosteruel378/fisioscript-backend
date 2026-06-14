@@ -1395,6 +1395,47 @@ app.post("/api/stripe/webhook", async (req, res) => {
       }
       break;
     }
+
+    case "customer.subscription.updated": {
+      // Stripe cambia el estado de la suscripción (ej. active → past_due → unpaid).
+      // Solo retiramos acceso cuando el estado es terminal de impago, no al primer fallo
+      // (Stripe reintenta el cobro varios días en estado 'past_due').
+      const sub = event.data.object;
+      const status = sub.status; // active, past_due, unpaid, canceled, incomplete...
+      console.log(`↻ Suscripción actualizada: ${sub.customer} → ${status}`);
+      if (status === 'unpaid' || status === 'canceled' || status === 'incomplete_expired') {
+        if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
+          try {
+            const userId = await resolveUserId(sub.metadata?.user_id || '', sub.customer_email);
+            if (userId) {
+              await updateUserPlan(userId, 'cancelled');
+              console.log(`✓ Acceso retirado por impago (${status}): ${userId}`);
+            }
+          } catch(e) { console.error('Error retirando acceso:', e.message); }
+        }
+      }
+      // Nota: 'past_due' NO retira acceso — Stripe sigue reintentando el cobro.
+      break;
+    }
+
+    case "invoice.payment_failed": {
+      // Una factura de renovación falló. Stripe reintentará automáticamente.
+      // Solo actuamos cuando se agotan TODOS los reintentos (no quedan más programados),
+      // para no echar a alguien por un fallo puntual del banco.
+      const invoice = event.data.object;
+      const noMoreRetries = !invoice.next_payment_attempt; // null = no habrá más intentos
+      console.log(`⚠ Cobro fallido: ${invoice.customer_email || invoice.customer} · ${noMoreRetries ? 'sin más reintentos' : 'reintentará'}`);
+      if (noMoreRetries && invoice.subscription && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
+        try {
+          const userId = await resolveUserId(invoice.subscription_details?.metadata?.user_id || '', invoice.customer_email);
+          if (userId) {
+            await updateUserPlan(userId, 'cancelled');
+            console.log(`✓ Acceso retirado tras agotar reintentos de cobro: ${userId}`);
+          }
+        } catch(e) { console.error('Error procesando impago:', e.message); }
+      }
+      break;
+    }
   }
   return res.json({ received: true });
 });
