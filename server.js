@@ -1282,6 +1282,46 @@ async function updateUserPlan(userId, plan) {
   });
 }
 
+// Cancela una clínica entera cuando el dueño deja de pagar:
+// retira el acceso a TODOS los fisios miembros, no solo al propietario.
+// Sin esto, los miembros invitados conservarían su plan de clínica y seguirían
+// usando FisioScript gratis aunque la suscripción que los pagaba ya no exista.
+async function cancelClinicByOwner(ownerId) {
+  try {
+    // 1. Localizar la clínica de este propietario
+    const clinicRes = await fetch(`${SB_REST()}/clinics?owner_id=eq.${ownerId}&select=id`, { headers: sbAdmin() });
+    const clinics = await clinicRes.json();
+    const clinic = clinics?.[0];
+    if (!clinic) {
+      // No tiene clínica: es un plan individual, basta con cancelar al usuario
+      await updateUserPlan(ownerId, 'cancelled');
+      return;
+    }
+    // 2. Obtener TODOS los miembros (incluido el owner)
+    const memRes = await fetch(`${SB_REST()}/clinic_members?clinic_id=eq.${clinic.id}&select=user_id,role`, { headers: sbAdmin() });
+    const members = await memRes.json();
+    if (!Array.isArray(members)) {
+      // Si no podemos leer los miembros, al menos cancelamos al dueño
+      await updateUserPlan(ownerId, 'cancelled');
+      return;
+    }
+    // 3. Cancelar el plan de cada miembro (owner + fisios invitados)
+    let count = 0;
+    for (const m of members) {
+      try { await updateUserPlan(m.user_id, 'cancelled'); count++; } catch(e) {}
+    }
+    // Asegurar que el owner queda cancelado aunque no figure en la lista
+    if (!members.some(m => m.user_id === ownerId)) {
+      try { await updateUserPlan(ownerId, 'cancelled'); } catch(e) {}
+    }
+    console.log(`✓ Clínica cancelada: ${count} miembro(s) sin acceso (clinic ${clinic.id})`);
+  } catch(e) {
+    console.error('Error cancelando clínica completa:', e.message);
+    // Fallback: cancelar al menos al propietario
+    try { await updateUserPlan(ownerId, 'cancelled'); } catch(e2) {}
+  }
+}
+
 // Crea la clínica del owner si no existe y lo añade como miembro 'owner'.
 async function ensureClinic(ownerId, email, plan, seats, stripeSubId, stripeCustomerId) {
   const rest = `${process.env.SUPABASE_URL}/rest/v1`;
@@ -1404,7 +1444,7 @@ app.post("/api/stripe/webhook", async (req, res) => {
         try {
           const userId = await resolveUserId(cancelMetaUserId, cancelEmail);
           if (userId) {
-            await updateUserPlan(userId, 'cancelled');
+            await cancelClinicByOwner(userId);
             console.log(`✓ Plan cancelado en Supabase: ${userId}`);
           }
         } catch(e) { console.error('Error cancelando plan:', e.message); }
@@ -1424,7 +1464,7 @@ app.post("/api/stripe/webhook", async (req, res) => {
           try {
             const userId = await resolveUserId(sub.metadata?.user_id || '', sub.customer_email);
             if (userId) {
-              await updateUserPlan(userId, 'cancelled');
+              await cancelClinicByOwner(userId);
               console.log(`✓ Acceso retirado por impago (${status}): ${userId}`);
             }
           } catch(e) { console.error('Error retirando acceso:', e.message); }
@@ -1445,7 +1485,7 @@ app.post("/api/stripe/webhook", async (req, res) => {
         try {
           const userId = await resolveUserId(invoice.subscription_details?.metadata?.user_id || '', invoice.customer_email);
           if (userId) {
-            await updateUserPlan(userId, 'cancelled');
+            await cancelClinicByOwner(userId);
             console.log(`✓ Acceso retirado tras agotar reintentos de cobro: ${userId}`);
           }
         } catch(e) { console.error('Error procesando impago:', e.message); }
