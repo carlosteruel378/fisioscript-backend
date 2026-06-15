@@ -1448,11 +1448,6 @@ app.post("/api/stripe/webhook", async (req, res) => {
   return res.json({ received: true });
 });
 
-// ── Endpoint de prueba de Sentry (quítalo cuando confirmes que funciona) ──────
-app.get("/debug-sentry", (req, res) => {
-  throw new Error("Error de prueba de Sentry — funciona correctamente");
-});
-
 // ── Error handlers ────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: "Ruta no encontrada." }));
 
