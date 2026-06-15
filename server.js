@@ -1,3 +1,8 @@
+// IMPORTANTE: instrument.js debe importarse ANTES que nada para que Sentry
+// capture errores desde el primer momento.
+import "./instrument.js";
+import * as Sentry from "@sentry/node";
+
 import express from "express";
 import cors from "cors";
 import Stripe from "stripe";
@@ -1370,7 +1375,10 @@ app.post("/api/stripe/webhook", async (req, res) => {
               try {
                 const extraSeats = parseInt(session.metadata?.extra_seats || '0') || 0;
                 await ensureClinic(userId, email, plan, 5 + extraSeats, session.subscription || null, session.customer || null);
-              } catch(e) { console.error('Error creando clínica:', e.message); }
+              } catch(e) {
+                console.error('Error creando clínica:', e.message);
+                if (process.env.SENTRY_DSN) Sentry.captureException(e, { tags: { area: 'webhook_clinica' }, extra: { email, plan } });
+              }
             }
           } else {
             console.warn(`⚠ Usuario no encontrado (userId: ${metaUserId}, email: ${email})`);
@@ -1440,8 +1448,17 @@ app.post("/api/stripe/webhook", async (req, res) => {
   return res.json({ received: true });
 });
 
+// ── Endpoint de prueba de Sentry (quítalo cuando confirmes que funciona) ──────
+app.get("/debug-sentry", (req, res) => {
+  throw new Error("Error de prueba de Sentry — funciona correctamente");
+});
+
 // ── Error handlers ────────────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: "Ruta no encontrada." }));
+
+// Sentry captura los errores de los endpoints (después de las rutas, antes del handler final)
+if (process.env.SENTRY_DSN) Sentry.setupExpressErrorHandler(app);
+
 app.use((err, req, res, next) => { console.error(err.message); res.status(500).json({ error: "Error interno." }); });
 
 app.listen(PORT, () => {
