@@ -4,8 +4,8 @@
   "type": "module",
   "description": "FisioScript API — Documentación clínica con IA",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node --import ./instrument.js server.js",
+    "dev": "node --import ./instrument.js --watch server.js"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -1,6 +1,6 @@
-// IMPORTANTE: instrument.js debe importarse ANTES que nada para que Sentry
-// capture errores desde el primer momento.
-import "./instrument.js";
+// Sentry se inicializa vía `node --import ./instrument.js` (ver package.json),
+// lo que garantiza que instrumente Express ANTES de que arranque. Aquí solo
+// importamos la API de Sentry para la captura manual de errores.
 import * as Sentry from "@sentry/node";
 
 import express from "express";
@@ -508,6 +508,18 @@ REGLAS:
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
 
+  // Salvaguarda de longitud: el modelo tiene un límite de contexto. Una
+  // transcripción muy larga (consulta de 30+ min) + system prompt + 4000 tokens
+  // de respuesta puede superarlo y provocar un rechazo inmediato de Groq (502).
+  // Recortamos a un máximo seguro (~24000 caracteres ≈ 6000 tokens) para que
+  // la consulta SIEMPRE se procese, aunque sea aproximando. Mejor eso que perderla.
+  const MAX_CHARS = 24000;
+  let safeText = text;
+  if (text.length > MAX_CHARS) {
+    console.warn(`Transcripción larga (${text.length} chars), recortando a ${MAX_CHARS}`);
+    safeText = text.slice(0, MAX_CHARS);
+  }
+
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -521,7 +533,7 @@ REGLAS:
         temperature: 0.1,
         messages: [
           { role: "system", content: system },
-          { role: "user", content: `Transcripción:\n\n${text}` },
+          { role: "user", content: `Transcripción:\n\n${safeText}` },
         ],
       }),
       signal: controller.signal,
@@ -531,6 +543,8 @@ REGLAS:
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
+      console.error('Groq /generate error:', response.status, JSON.stringify(err).slice(0, 400));
+      if (process.env.SENTRY_DSN) { try { Sentry.captureMessage(`Groq generate ${response.status}: ${JSON.stringify(err).slice(0,200)}`, 'error'); } catch(_){} }
       if (response.status === 429) return res.status(429).json({ error: "Servicio saturado. Inténtalo en unos segundos." });
       return res.status(502).json({ error: "Error al procesar con IA." });
     }
