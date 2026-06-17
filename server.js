@@ -1187,7 +1187,12 @@ app.delete("/api/clinic/member", rateLimit(10, 60_000), async (req, res) => {
     if (!delRes.ok) return res.status(500).json({ error: "No se pudo quitar el miembro." });
 
     // Devolver al usuario quitado a plan trial cancelado
-    try { await updateUserPlan(userId, 'cancelled'); } catch(e) {}
+    try { await updateUserPlan(userId, 'cancelled'); }
+    catch(e) {
+      // Si falla, el fisio expulsado mantendría acceso de clínica: hay que saberlo.
+      console.error(`✗ No se pudo revertir el plan del miembro expulsado ${userId}:`, e.message);
+      if (process.env.SENTRY_DSN) { try { Sentry.captureException(e, { tags: { area: 'remove_member_plan' }, extra: { userId, clinicId: clinic.id } }); } catch(_){} }
+    }
 
     return res.json({ ok: true });
   } catch(e) {
@@ -1430,18 +1435,37 @@ async function cancelClinicByOwner(ownerId) {
     }
     // 3. Cancelar el plan de cada miembro (owner + fisios invitados)
     let count = 0;
+    const fallidos = [];
     for (const m of members) {
-      try { await updateUserPlan(m.user_id, 'cancelled'); count++; } catch(e) {}
+      try { await updateUserPlan(m.user_id, 'cancelled'); count++; }
+      catch(e) {
+        // Si falla cancelar a un miembro, queda con acceso indebido: hay que saberlo.
+        console.error(`✗ No se pudo cancelar al miembro ${m.user_id} (clinic ${clinic.id}):`, e.message);
+        fallidos.push(m.user_id);
+      }
     }
     // Asegurar que el owner queda cancelado aunque no figure en la lista
     if (!members.some(m => m.user_id === ownerId)) {
-      try { await updateUserPlan(ownerId, 'cancelled'); } catch(e) {}
+      try { await updateUserPlan(ownerId, 'cancelled'); count++; }
+      catch(e) {
+        console.error(`✗ No se pudo cancelar al owner ${ownerId} (clinic ${clinic.id}):`, e.message);
+        fallidos.push(ownerId);
+      }
     }
-    console.log(`✓ Clínica cancelada: ${count} miembro(s) sin acceso (clinic ${clinic.id})`);
+    // Si algún usuario quedó SIN cancelar, es una fuga de acceso: reportar a Sentry.
+    if (fallidos.length && process.env.SENTRY_DSN) {
+      try { Sentry.captureMessage(`Cancelación de clínica incompleta: ${fallidos.length} usuario(s) con acceso indebido`, { level: 'error', tags: { area: 'cancel_clinic' }, extra: { clinicId: clinic.id, ownerId, fallidos } }); } catch(_){}
+    }
+    console.log(`✓ Clínica cancelada: ${count} miembro(s) sin acceso${fallidos.length ? `, ${fallidos.length} FALLIDO(S)` : ''} (clinic ${clinic.id})`);
   } catch(e) {
     console.error('Error cancelando clínica completa:', e.message);
+    if (process.env.SENTRY_DSN) { try { Sentry.captureException(e, { tags: { area: 'cancel_clinic' }, extra: { ownerId } }); } catch(_){} }
     // Fallback: cancelar al menos al propietario
-    try { await updateUserPlan(ownerId, 'cancelled'); } catch(e2) {}
+    try { await updateUserPlan(ownerId, 'cancelled'); }
+    catch(e2) {
+      console.error(`✗ Fallback: tampoco se pudo cancelar al owner ${ownerId}:`, e2.message);
+      if (process.env.SENTRY_DSN) { try { Sentry.captureMessage(`Cancelación de clínica FALLÓ por completo para owner ${ownerId}`, { level: 'error', tags: { area: 'cancel_clinic' } }); } catch(_){} }
+    }
   }
 }
 
