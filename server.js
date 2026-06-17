@@ -253,6 +253,116 @@ function getConditionFull(id) {
 
 const COMPACT_CONTEXT = buildCompactContext();
 
+// ═══════════════════════════════════════════════════════════════════════════
+// BLOQUE FIJO DEL PROMPT DE GENERACIÓN (para prompt caching de Groq)
+// ───────────────────────────────────────────────────────────────────────────
+// Este texto es IDÉNTICO en todas las peticiones a /api/generate, así que Groq
+// lo cachea automáticamente y sus tokens dejan de contar para el límite TPM.
+// Se calcula UNA vez al arrancar (no en cada petición). Incluye el esquema
+// completo (primera visita Y seguimiento) para no romper el prefijo cacheable;
+// la instrucción variable de cada petición le dice a la IA qué rama rellenar.
+// Descripciones de campo aligeradas (palabras clave, no frases largas) para
+// reducir tokens sin perder la guía que la IA necesita.
+// ═══════════════════════════════════════════════════════════════════════════
+const SYSTEM_GENERATE_FIXED = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento (KB) validada.
+
+INSTRUCCIONES:
+1. Analiza la transcripción usando la KB de la región que se te facilita.
+2. Probabilidad (0-100%) según patrones clínicos coincidentes.
+3. Tests: usa sensibilidad/especificidad de la KB.
+4. Recuperación y tratamiento: usa los protocolos del condition_id identificado.
+5. Si no se menciona algo: [] para listas, "No mencionado" para texto.
+6. Rellena SOLO la rama del esquema que indique el TIPO DE SESIÓN (primera_visita o seguimiento).
+
+Devuelve ÚNICAMENTE este JSON (sin markdown ni texto extra). Usa la rama "primera_visita" O la rama "seguimiento" según corresponda:
+{
+  "historia": {
+    "motivo": "localización, inicio, mecanismo, características del dolor (tipo, irradiación, ritmo)",
+    "edad": "edad y demografía",
+    "antecedentes": "médicos, quirúrgicos, lesiones previas en la zona",
+    "medicacion": "medicación relevante",
+    "deporte": "actividad física/laboral: nivel, frecuencia, demandas",
+    "factores_contexto": "trabajo, sueño, estrés, expectativas, objetivos del paciente",
+    "exploracion": "inspección, ROM en grados, palpación, fuerza, neurológico, EVA",
+    "tratamiento": "técnicas y pautas de esta sesión",
+    "observaciones": "evolución y factores psicosociales"
+  },
+  "soap": {
+    "S": "subjetivo completo",
+    "O": "objetivo: ROM en grados, tests y resultado",
+    "A": "diagnóstico fisioterápico, estructuras afectadas, severidad",
+    "P": "plan: técnicas con dosis, ejercicios, objetivos, próxima cita"
+  },
+  "banderas_rojas": [
+    {"titulo": "nombre", "descripcion": "explicación", "severidad": "alta|media", "accion": "acción concreta"}
+  ],
+  "banderas_amarillas": [
+    {"titulo": "nombre", "descripcion": "factor psicosocial", "severidad": "media|baja", "accion": "enfoque"}
+  ],
+  "hipotesis": {
+    "principal": "diagnóstico más probable (nombre exacto de la KB si coincide)",
+    "condition_id": "id exacto de la KB o null",
+    "confianza": 0.75,
+    "razonamiento": "qué patrones coinciden y cuáles no",
+    "diferenciales": [
+      {"nombre": "diferencial", "probabilidad": 30, "condition_id": "id o null"}
+    ]
+  },
+  "tests": [
+    {"nombre": "nombre", "zona": "región", "estructura": "estructura", "resultado": "positivo|negativo|no realizado", "sensibilidad": "valor% KB o null", "especificidad": "valor% KB o null", "interpretacion": "significado clínico"}
+  ],
+  "recuperacion": {
+    "estimacion_dias": {"min": 14, "max": 42},
+    "estimacion_texto": "tiempo esperado según KB",
+    "fase_actual": "agudo|subagudo|crónico|rehabilitación|vuelta_actividad",
+    "criterios_rts": ["criterio KB 1", "criterio KB 2"],
+    "factores_riesgo_recaida": ["factor KB"],
+    "notas": "consideraciones del caso"
+  },
+  "tratamiento_sugerido": {
+    "fase_actual": "Fase aguda|Fase subaguda|Fase de carga|Fase funcional|Mantenimiento",
+    "kb_protocolo": "protocolo KB del condition_id",
+    "tecnicas_manuales": ["técnica KB con indicación"],
+    "ejercicios_clave": ["ejercicio KB con dosis"],
+    "educacion_paciente": ["mensaje educativo KB"],
+    "proximos_pasos": "plan próximas sesiones",
+    "derivacion": "derivación o 'No necesaria de momento'"
+  },
+
+  "objetivos_basales": [
+    {"texto": "objetivo SMART con métrica (ej. EVA de 7 a ≤3 en 6 semanas)", "metrica": "EVA|ROM|fuerza|funcional", "valor_inicial": "partida", "valor_meta": "objetivo", "plazo": "plazo"}
+  ],
+  "pronostico": {"valoracion": "favorable|reservado|desfavorable", "razonamiento": "una frase según el caso y la KB"},
+
+  "evolucion": {
+    "tendencia": "mejora|estancamiento|empeoramiento",
+    "resumen": "comparación con sesiones anteriores: dolor, función, respuesta",
+    "cambio_eva": "evolución del dolor con números (ej. de 6 a 4)",
+    "cambio_funcional": "cambios en ROM, fuerza o función vs sesiones previas",
+    "adherencia": "¿hace los ejercicios? ¿cumple el plan? 'No mencionado' si no consta",
+    "respuesta_tratamiento": "qué funciona y qué no",
+    "ajuste_plan": "ajustes según evolución"
+  },
+  "diagnostico_seguimiento": {"confirmado": "se mantiene|revisado", "cambio": "nuevo dx y por qué, o 'Se mantiene el diagnóstico inicial'"},
+  "objetivos_progreso": [
+    {"objetivo": "objetivo basal previo", "estado": "cumplido|en progreso|sin avance|estancado", "nota": "comentario breve"}
+  ],
+  "fase_tratamiento": {"fase_actual": "fase actual", "progresion": "avanza|se mantiene|retrocede + explicación breve"},
+  "tratamiento_hoy": {"aplicado": "qué se hizo hoy", "ajuste_plan": "qué cambia para la próxima", "ejercicios_actualizados": ["ejercicio casa con dosis"]},
+  "alertas": ["estancamiento, recaída, abandono de adherencia, o 'considerar derivación si no mejora en X sesiones'. [] si no hay"]
+}
+
+IMPORTANTE — según el TIPO DE SESIÓN que se indique más abajo:
+- Si es primera_visita: rellena objetivos_basales y pronostico; deja evolucion, diagnostico_seguimiento, objetivos_progreso, fase_tratamiento, tratamiento_hoy y alertas como [] o null.
+- Si es seguimiento: rellena evolucion, diagnostico_seguimiento, objetivos_progreso, fase_tratamiento, tratamiento_hoy y alertas; deja objetivos_basales y pronostico como [] o null.
+
+REGLAS:
+- condition_id: ID exacto de la KB si coincide. Crítico para recuperación y tratamiento.
+- confianza 0.0-1.0: 1-2 patrones 0.3-0.5; 3-4 patrones 0.5-0.7; 5+ patrones 0.7-0.95.
+- estimacion_dias: usa rts_days de la KB si condition_id coincide.
+- Sin mención: [] para listas, "No mencionado" para texto.
+- Tratamiento exhaustivo: protocolos reales de fisioterapia.`;
+
 // Índice mínimo de red flags (siempre relevantes, pesan poco). Se incluye en
 // cada petición porque las banderas rojas pueden aplicar a cualquier región.
 const REDFLAGS_COMPACT = 'BANDERAS ROJAS:\n' +
@@ -419,128 +529,28 @@ Esta es una REVISIÓN, no una primera visita. NO repitas la anamnesis (anteceden
     clinicalContext = COMPACT_CONTEXT;
   }
 
-  const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada.
+  // ── PROMPT EN DOS BLOQUES PARA APROVECHAR EL PROMPT CACHING DE GROQ ──────────
+  // Groq cachea el PREFIJO común entre peticiones (gratis, automático) y esos
+  // tokens cacheados NO cuentan para el límite de 12000 TPM. Por eso ponemos
+  // PRIMERO todo lo que es idéntico en cada petición (rol + instrucciones +
+  // esquema JSON, ~1700 tokens fijos) y DESPUÉS lo variable (idioma, contexto
+  // clínico de la región, tipo de sesión, transcripción). Así el bloque fijo
+  // se cachea y deja de consumir presupuesto TPM en cada llamada.
 
-LANGUAGE: ${langInstruction}
+  // BLOQUE FIJO (cacheable): rol + esquema. Idéntico en TODAS las peticiones.
+  const SYSTEM_FIXED = SYSTEM_GENERATE_FIXED;
 
-${clinicalContext}${previousContext}
+  // BLOQUE VARIABLE: lo que cambia entre peticiones, va al final.
+  const sessionRule = isFollowUp
+    ? `SEGUIMIENTO: NO reconstruyas la anamnesis. En historia, los campos antecedentes/medicacion/edad/deporte deben ser "Sin cambios desde la primera visita" salvo que la transcripción mencione algo nuevo. Concéntrate en evolucion, objetivos_progreso, diagnostico_seguimiento, fase_tratamiento, tratamiento_hoy y alertas. Para "seguimiento", usa la estructura de seguimiento del esquema.`
+    : `PRIMERA VISITA: anamnesis completa, screening exhaustivo de banderas rojas/amarillas, objetivos_basales medibles y pronostico inicial. Para "primera_visita", usa la estructura de primera visita del esquema.`;
 
-INSTRUCCIONES:
-1. Analiza la transcripción usando la base de conocimiento.
-2. Calcula probabilidad (0-100%) según patrones clínicos coincidentes.
-3. Para tests: usa sensibilidad/especificidad de la KB.
-4. Para recuperacion y tratamiento: usa los protocolos del condition_id identificado.
-5. Si no se menciona algo: usa [] para listas o "No mencionado" para texto.
-${isFollowUp
-  ? `6. SEGUIMIENTO: NO reconstruyas la anamnesis. En historia, los campos antecedentes/medicacion/edad/deporte deben ser "Sin cambios desde la primera visita" salvo que en la transcripción se mencione algo nuevo. Concéntrate en evolucion, objetivos_progreso, diagnostico_seguimiento, fase_tratamiento, tratamiento_hoy y alertas.`
-  : `6. PRIMERA VISITA: realiza una anamnesis completa, un screening exhaustivo de banderas rojas y amarillas, establece objetivos_basales medibles y un pronostico inicial. Sé riguroso: es el momento de máxima recogida de información.`}
+  const system = `${SYSTEM_FIXED}
 
-Devuelve ÚNICAMENTE este JSON, sin markdown ni texto adicional:
-{
-  "historia": {
-    "motivo": "motivo detallado con localización, inicio, mecanismo lesional y características del dolor (tipo, irradiación, ritmo)",
-    "edad": "edad y datos demográficos",
-    "antecedentes": "antecedentes médicos, quirúrgicos y lesiones previas en la zona",
-    "medicacion": "medicación actual relevante",
-    "deporte": "actividad física/laboral, nivel, frecuencia y demandas",
-    "factores_contexto": "trabajo, sueño, estrés, expectativas y objetivos personales del paciente",
-    "exploracion": "exploración: inspección, ROM con grados, palpación, fuerza, hallazgos neurológicos, EVA",
-    "tratamiento": "técnicas aplicadas y pautas en esta sesión",
-    "observaciones": "evolución y factores psicosociales"
-  },
-  "soap": {
-    "S": "síntomas subjetivos completos",
-    "O": "hallazgos objetivos: ROM con grados, tests y resultado",
-    "A": "evaluación: diagnóstico fisioterápico, estructuras afectadas, severidad",
-    "P": "plan: técnicas con dosis, ejercicios, objetivos, próxima cita"
-  },
-  "banderas_rojas": [
-    {"titulo": "nombre", "descripcion": "explicación clínica", "severidad": "alta|media", "accion": "acción concreta"}
-  ],
-  "banderas_amarillas": [
-    {"titulo": "nombre", "descripcion": "factor psicosocial", "severidad": "media|baja", "accion": "enfoque"}
-  ],
-  "hipotesis": {
-    "principal": "diagnóstico más probable (nombre exacto de la base de datos si coincide)",
-    "condition_id": "id exacto de la base de datos o null",
-    "confianza": 0.75,
-    "razonamiento": "razonamiento clínico: qué patrones coinciden y cuáles no",
-    "diferenciales": [
-      {"nombre": "diagnóstico diferencial 1", "probabilidad": 30, "condition_id": "id o null"},
-      {"nombre": "diagnóstico diferencial 2", "probabilidad": 15, "condition_id": "id o null"}
-    ]
-  },
-  "tests": [
-    {
-      "nombre": "nombre completo",
-      "zona": "región anatómica",
-      "estructura": "estructura evaluada",
-      "resultado": "positivo|negativo|no realizado",
-      "sensibilidad": "valor% si está en base de datos o null",
-      "especificidad": "valor% si está en base de datos o null",
-      "interpretacion": "significado clínico en este caso"
-    }
-  ],
-  "recuperacion": {
-    "estimacion_dias": {"min": 14, "max": 42},
-    "estimacion_texto": "descripción legible del tiempo esperado basada en la KB",
-    "fase_actual": "agudo|subagudo|crónico|rehabilitación|vuelta_actividad",
-    "criterios_rts": ["criterio objetivo 1 de la KB", "criterio objetivo 2", "criterio objetivo 3"],
-    "factores_riesgo_recaida": ["factor de la KB que aplique al caso"],
-    "notas": "consideraciones específicas del caso clínico"
-  },
-  "tratamiento_sugerido": {
-    "fase_actual": "Fase aguda|Fase subaguda|Fase de carga|Fase funcional|Mantenimiento",
-    "kb_protocolo": "protocolo base de la KB para este condition_id",
-    "tecnicas_manuales": ["técnica 1 de la KB con indicación", "técnica 2"],
-    "ejercicios_clave": ["ejercicio 1 de la KB con dosis", "ejercicio 2"],
-    "educacion_paciente": ["mensaje educativo clave de la KB", "mensaje 2"],
-    "proximos_pasos": "plan para próximas sesiones",
-    "derivacion": "derivación si es necesaria o 'No necesaria de momento'"
-  }${isFollowUp ? `,
-  "evolucion": {
-    "tendencia": "mejora|estancamiento|empeoramiento",
-    "resumen": "párrafo comparando el estado actual con las sesiones anteriores del episodio: dolor, función, respuesta al tratamiento",
-    "cambio_eva": "evolución del dolor con números si los hay (ej. de 6 a 4)",
-    "cambio_funcional": "cambios en ROM, fuerza o capacidad funcional respecto a sesiones previas",
-    "adherencia": "¿ha realizado los ejercicios pautados? ¿cumple el plan? 'No mencionado' si no consta",
-    "respuesta_tratamiento": "qué técnicas/ejercicios están funcionando y cuáles no",
-    "ajuste_plan": "ajustes recomendados al plan según la evolución observada"
-  },
-  "diagnostico_seguimiento": {
-    "confirmado": "se mantiene|revisado",
-    "cambio": "si cambia, nuevo diagnóstico y por qué; si no, 'Se mantiene el diagnóstico inicial'"
-  },
-  "objetivos_progreso": [
-    {"objetivo": "objetivo basal de la primera visita", "estado": "cumplido|en progreso|sin avance|estancado", "nota": "comentario breve"}
-  ],
-  "fase_tratamiento": {
-    "fase_actual": "fase en la que se encuentra ahora",
-    "progresion": "avanza|se mantiene|retrocede — con explicación breve (ej. 'pasa de fase de carga a funcional')"
-  },
-  "tratamiento_hoy": {
-    "aplicado": "qué se ha hecho en la sesión de hoy",
-    "ajuste_plan": "qué cambia para la próxima sesión (progresión de carga, nuevos ejercicios)",
-    "ejercicios_actualizados": ["ejercicio actualizado para casa con dosis"]
-  },
-  "alertas": [
-    "avisos automáticos relevantes: estancamiento si no mejora, posible recaída, abandono de adherencia, o 'considerar derivación si no mejora en X sesiones'. [] si no hay"
-  ]` : `,
-  "objetivos_basales": [
-    {"texto": "objetivo SMART con métrica de partida (ej. reducir EVA de 7 a ≤3 en 6 semanas)", "metrica": "EVA|ROM|fuerza|funcional", "valor_inicial": "valor de partida", "valor_meta": "valor objetivo", "plazo": "plazo estimado"}
-  ],
-  "pronostico": {
-    "valoracion": "favorable|reservado|desfavorable",
-    "razonamiento": "por qué, en una frase, según factores del caso y la KB"
-  }`}
-}
-
-REGLAS:
-- condition_id: usa el ID exacto de la base de datos si el diagnóstico coincide. Crítico para recuperación y tratamiento.
-- confianza: 0.0-1.0 basado en coincidencia de patrones. Con 1-2 patrones: 0.3-0.5. Con 3-4 patrones: 0.5-0.7. Con 5+ patrones: 0.7-0.95.
-- estimacion_dias: usa rts_days de la base de datos si condition_id coincide.
-- Si algo no se menciona: usa [] para listas o "No mencionado" para campos de texto.
-- Sé exhaustivo con el tratamiento: protocolos reales de fisioterapia.`;
+═══ CONTEXTO DE ESTA CONSULTA ═══
+IDIOMA: ${langInstruction}
+TIPO DE SESIÓN: ${sessionRule}
+${clinicalContext}${previousContext}`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
@@ -608,6 +618,10 @@ REGLAS:
     let parsed;
     try { parsed = JSON.parse(match[0]); }
     catch (e) { return res.status(502).json({ error: "Error al parsear respuesta." }); }
+
+    // Limpiar posibles claves-comentario que la IA pudiera copiar del esquema
+    // (las que empiezan por "//"). No deben llegar al cliente.
+    for (const k of Object.keys(parsed)) { if (k.startsWith('//')) delete parsed[k]; }
 
     // Defaults y normalización
     parsed.historia = parsed.historia || {};
