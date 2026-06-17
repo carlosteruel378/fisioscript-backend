@@ -1126,15 +1126,24 @@ app.post("/api/clinic/member", rateLimit(10, 60_000), async (req, res) => {
       return res.status(500).json({ error: "No se pudo añadir el miembro." });
     }
 
-    // 6. Marcar el plan del invitado como clinica (para que pase el muro de acceso)
-    let planUpdated = true;
-    try {
-      const r = await updateUserPlan(invitedId, clinic.plan);
-      if (r && r.ok === false) planUpdated = false;
-    } catch(e) {
-      planUpdated = false;
-      console.error('Error actualizando plan del invitado:', e.message);
-      if (process.env.SENTRY_DSN) { try { Sentry.captureException(e, { tags: { area: 'invite_member_plan' }, extra: { invitedId, plan: clinic.plan } }); } catch(_){} }
+    // 6. Marcar el plan del invitado como clinica (para que pase el muro de acceso).
+    // Reintentamos hasta 3 veces ante fallos transitorios, porque si esto falla
+    // el fisio queda sin acceso. Solo si los 3 intentos fallan avisamos al dueño.
+    let planUpdated = false;
+    for (let intento = 1; intento <= 3; intento++) {
+      try {
+        const r = await updateUserPlan(invitedId, clinic.plan);
+        if (!r || r.ok !== false) { planUpdated = true; break; }
+      } catch(e) {
+        console.error(`Error actualizando plan del invitado (intento ${intento}/3):`, e.message);
+        if (intento === 3 && process.env.SENTRY_DSN) {
+          try { Sentry.captureException(e, { tags: { area: 'invite_member_plan' }, extra: { invitedId, plan: clinic.plan } }); } catch(_){}
+        }
+      }
+      if (!planUpdated && intento < 3) await new Promise(r => setTimeout(r, 400));
+    }
+    if (!planUpdated && process.env.SENTRY_DSN) {
+      try { Sentry.captureMessage(`No se pudo activar el plan del fisio invitado ${invitedId} tras 3 intentos`, 'warning'); } catch(_){}
     }
 
     return res.json({ ok: true, planUpdated, member: { user_id: invitedId, email, name: invitedName, role: 'member' } });
