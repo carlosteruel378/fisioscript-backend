@@ -216,23 +216,47 @@ function getRegionProtocols(rid) {
   if (!rid) return '';
   const conds = CLINICAL_KB.conditions.filter(c => c.r === rid);
   if (!conds.length) return '';
+  // Versión compacta: damos a la IA lo esencial para reconocer y manejar cada
+  // condición (patrones, fases, RTS, ejercicio clave, educación clave) sin volcar
+  // TODO el detalle de la KB. Esto mantiene la petición por debajo del límite de
+  // 12000 tokens/min de Groq incluso en regiones con muchas condiciones (p.ej. pie).
   return '\nPROTOCOLOS REGIÓN ' + (CLINICAL_KB.regions[rid]||rid).toUpperCase() + ':\n' +
     conds.map(c => {
-      const fases = (c.fases||[]).map(f => `${f.n}: ${f.c}`).join(' | ');
-      const rts = (c.criterios_rts||[]).join('; ');
-      const manuales = (c.tecnicas_manuales||[]).join('; ');
+      const patrones = (c.p||[]).join(', ');
+      const fases = (c.fases||[]).map(f => f.n).join(' → ');
+      const rts = (c.rts_days && c.rts_days[0]) ? `${c.rts_days[0]}-${c.rts_days[1]||'?'} días` : '';
+      // Solo 2 ejercicios representativos (inicial + avanzado) en vez de los 9
       const ej = c.ejercicio ? [
-        ...(c.ejercicio.inicial||[]),
-        ...(c.ejercicio.intermedio||[]),
-        ...(c.ejercicio.avanzado||[])
-      ].join('; ') : '';
-      const edu = (c.educacion||[]).join('; ');
-      const recaida = (c.factores_recaida||[]).join('; ');
-      return `[${c.id}] ${c.n}\n  Fases: ${fases}\n  RTS: ${rts}\n  Manual: ${manuales}\n  Ejercicio: ${ej}\n  Educación: ${edu}\n  Recaída: ${recaida}`;
+        (c.ejercicio.inicial||[])[0],
+        (c.ejercicio.avanzado||[])[0]
+      ].filter(Boolean).join('; ') : '';
+      const edu = (c.educacion||[]).slice(0,2).join('; ');
+      return `[${c.id}] ${c.n}\n  Señales: ${patrones}\n  Fases: ${fases}${rts?' | RTS: '+rts:''}\n  Ejercicio: ${ej}\n  Educación: ${edu}`;
     }).join('\n');
 }
 
+// Versión COMPLETA de una sola condición — para cuando ya se conoce el diagnóstico
+// (endpoint /api/clinical/condition). No se usa en el prompt de generación masiva.
+function getConditionFull(id) {
+  const c = CLINICAL_KB.conditions.find(x => x.id === id);
+  if (!c) return '';
+  const fases = (c.fases||[]).map(f => `${f.n}: ${f.c}`).join(' | ');
+  const rts = (c.criterios_rts||[]).join('; ');
+  const manuales = (c.tecnicas_manuales||[]).join('; ');
+  const ej = c.ejercicio ? [
+    ...(c.ejercicio.inicial||[]), ...(c.ejercicio.intermedio||[]), ...(c.ejercicio.avanzado||[])
+  ].join('; ') : '';
+  const edu = (c.educacion||[]).join('; ');
+  const recaida = (c.factores_recaida||[]).join('; ');
+  return `[${c.id}] ${c.n}\n  Fases: ${fases}\n  RTS: ${rts}\n  Manual: ${manuales}\n  Ejercicio: ${ej}\n  Educación: ${edu}\n  Recaída: ${recaida}`;
+}
+
 const COMPACT_CONTEXT = buildCompactContext();
+
+// Índice mínimo de red flags (siempre relevantes, pesan poco). Se incluye en
+// cada petición porque las banderas rojas pueden aplicar a cualquier región.
+const REDFLAGS_COMPACT = 'BANDERAS ROJAS:\n' +
+  CLINICAL_KB.red_flags.map(r => `⚠${r.n}→${r.sug} (${r.urg})`).join('\n');
 
 // ── POST /api/transcribe — Whisper (Groq) ─────────────────────────────────────
 // Recibe audio binario (webm/opus), lo transcribe con Whisper y devuelve el texto.
@@ -382,11 +406,24 @@ ${parts.join("\n")}
 Esta es una REVISIÓN, no una primera visita. NO repitas la anamnesis (antecedentes, medicación, edad, deporte ya constan de la primera visita). Céntrate en el CAMBIO respecto a las sesiones anteriores de este episodio.`;
   }
 
+  // Contexto clínico: enviamos el detalle SOLO de la región detectada + las
+  // banderas rojas (siempre relevantes, pesan poco). NO enviamos el índice de
+  // todas las condiciones: para diagnosticar la zona que el fisio explora, la IA
+  // solo necesita los protocolos de esa región. Esto mantiene la petición muy por
+  // debajo del límite de 12000 tokens/min de Groq, sin importar cuánto crezca la KB.
+  let clinicalContext;
+  if (regionProtocol) {
+    clinicalContext = `${REDFLAGS_COMPACT}${regionProtocol}`;
+  } else {
+    // Sin región detectada: contexto compacto completo como fallback
+    clinicalContext = COMPACT_CONTEXT;
+  }
+
   const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada.
 
 LANGUAGE: ${langInstruction}
 
-${COMPACT_CONTEXT}${regionProtocol}${previousContext}
+${clinicalContext}${previousContext}
 
 INSTRUCCIONES:
 1. Analiza la transcripción usando la base de conocimiento.
@@ -521,7 +558,9 @@ REGLAS:
   }
 
   try {
-    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    // Llamada a Groq reutilizable, para poder reintentar con menos tokens si
+    // Groq rechaza por límite TPM (413). maxTok ajustable.
+    const callGroqGen = (maxTok) => fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -529,7 +568,7 @@ REGLAS:
       },
       body: JSON.stringify({
         model: "llama-3.3-70b-versatile",
-        max_tokens: 4000,
+        max_tokens: maxTok,
         temperature: 0.1,
         messages: [
           { role: "system", content: system },
@@ -539,6 +578,17 @@ REGLAS:
       signal: controller.signal,
     });
 
+    let response = await callGroqGen(2500);
+
+    // Si Groq rechaza por exceder el límite TPM (413/rate_limit en tokens),
+    // reintentamos UNA vez pidiendo menos tokens de respuesta. Así una consulta
+    // nunca falla del todo solo porque el prompt + respuesta rozan el límite.
+    if (response.status === 413) {
+      const errBody = await response.clone().json().catch(() => ({}));
+      console.warn('Groq 413 (TPM), reintentando con max_tokens reducido:', JSON.stringify(errBody).slice(0,200));
+      response = await callGroqGen(1500);
+    }
+
     clearTimeout(timeout);
 
     if (!response.ok) {
@@ -546,6 +596,7 @@ REGLAS:
       console.error('Groq /generate error:', response.status, JSON.stringify(err).slice(0, 400));
       if (process.env.SENTRY_DSN) { try { Sentry.captureMessage(`Groq generate ${response.status}: ${JSON.stringify(err).slice(0,200)}`, 'error'); } catch(_){} }
       if (response.status === 429) return res.status(429).json({ error: "Servicio saturado. Inténtalo en unos segundos." });
+      if (response.status === 413) return res.status(413).json({ error: "La consulta es demasiado extensa para procesarla ahora. Inténtalo de nuevo en un minuto." });
       return res.status(502).json({ error: "Error al procesar con IA." });
     }
 
@@ -780,9 +831,14 @@ app.post("/api/rehipotesis", rateLimit(15, 60_000), requireAuth(), async (req, r
   const detectedRegion = detectRegion(text);
   const regionProtocol = getRegionProtocols(detectedRegion);
 
+  // Mismo criterio que /generate: solo región detectada + red flags.
+  const clinicalContext = regionProtocol
+    ? `${REDFLAGS_COMPACT}${regionProtocol}`
+    : COMPACT_CONTEXT;
+
   const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada.
 
-${buildCompactContext()}${regionProtocol}
+${clinicalContext}
 
 TAREA: El fisioterapeuta ha COMPLETADO la exploración física y ha confirmado los resultados de los tests clínicos. Recalcula la hipótesis diagnóstica dando MÁXIMO PESO a los resultados de los tests confirmados (su sensibilidad y especificidad determinan cuánto modifican la probabilidad), junto con los signos y síntomas de la historia.
 
