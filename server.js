@@ -1210,6 +1210,7 @@ app.post("/api/clinic/seats", rateLimit(10, 60_000), async (req, res) => {
   if (!user) return res.status(401).json({ error: "No autorizado." });
 
   const EXTRA_SEAT_PRICE = process.env.PRICE_EXTRA_SEAT || 'price_1Tcit7POSeyVBgtaC7CSaSJs';
+  const EXTRA_SEAT_PRICE_ANNUAL = process.env.PRICE_EXTRA_SEAT_ANNUAL || null;
 
   try {
     // 1. Verificar que es owner de una clínica
@@ -1241,7 +1242,20 @@ app.post("/api/clinic/seats", rateLimit(10, 60_000), async (req, res) => {
     const sub = await stripe.subscriptions.retrieve(subId);
     if (!sub || sub.status !== 'active') return res.status(400).json({ error: "La suscripción no está activa." });
 
-    const extraItem = sub.items.data.find(it => it.price?.id === EXTRA_SEAT_PRICE);
+    // Stripe exige que todos los items de una suscripción compartan el mismo
+    // intervalo (mensual/anual). Detectamos el intervalo del plan de la clínica
+    // y elegimos el precio de plaza extra que coincida. Si la clínica es anual
+    // pero no hay precio de plaza extra anual configurado, avisamos en vez de fallar.
+    const planInterval = sub.items.data[0]?.price?.recurring?.interval || 'month';
+    let seatPrice = EXTRA_SEAT_PRICE;
+    if (planInterval === 'year') {
+      if (!EXTRA_SEAT_PRICE_ANNUAL) {
+        return res.status(400).json({ error: "Las plazas extra para el plan anual aún no están disponibles. Contacta con soporte para añadir un fisioterapeuta." });
+      }
+      seatPrice = EXTRA_SEAT_PRICE_ANNUAL;
+    }
+
+    const extraItem = sub.items.data.find(it => it.price?.id === seatPrice);
     if (extraItem) {
       await stripe.subscriptionItems.update(extraItem.id, {
         quantity: (extraItem.quantity || 0) + 1,
@@ -1250,7 +1264,7 @@ app.post("/api/clinic/seats", rateLimit(10, 60_000), async (req, res) => {
     } else {
       await stripe.subscriptionItems.create({
         subscription: subId,
-        price: EXTRA_SEAT_PRICE,
+        price: seatPrice,
         quantity: 1,
         proration_behavior: 'create_prorations',
       });
