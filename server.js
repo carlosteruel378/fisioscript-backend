@@ -1255,6 +1255,12 @@ app.post("/api/clinic/seats", rateLimit(10, 60_000), async (req, res) => {
       seatPrice = EXTRA_SEAT_PRICE_ANNUAL;
     }
 
+    // Tope de seguridad: no permitir crecer sin límite (5 base + 20 extra = 25).
+    const MAX_SEATS = 25;
+    if ((clinic.seats || 5) >= MAX_SEATS) {
+      return res.status(400).json({ error: `Has alcanzado el máximo de ${MAX_SEATS} plazas. Contacta con soporte si necesitas más.` });
+    }
+
     const extraItem = sub.items.data.find(it => it.price?.id === seatPrice);
     if (extraItem) {
       await stripe.subscriptionItems.update(extraItem.id, {
@@ -1270,12 +1276,28 @@ app.post("/api/clinic/seats", rateLimit(10, 60_000), async (req, res) => {
       });
     }
 
-    // 4. Incrementar las plazas en la base de datos
+    // 4. Incrementar las plazas en la base de datos.
+    // CRÍTICO: el cobro en Stripe ya se hizo. Si este PATCH falla, el cliente
+    // habría pagado sin recibir la plaza → descuadre. Lo detectamos y reportamos
+    // para corregirlo manualmente (no dejamos que falle en silencio).
     const newSeats = (clinic.seats || 5) + 1;
-    await fetch(`${SB_REST()}/clinics?id=eq.${clinic.id}`, {
-      method: 'PATCH', headers: sbAdmin(),
-      body: JSON.stringify({ seats: newSeats }),
-    });
+    let dbOk = false;
+    try {
+      const patchRes = await fetch(`${SB_REST()}/clinics?id=eq.${clinic.id}`, {
+        method: 'PATCH', headers: sbAdmin(),
+        body: JSON.stringify({ seats: newSeats }),
+      });
+      dbOk = patchRes.ok;
+    } catch(e) { dbOk = false; }
+
+    if (!dbOk) {
+      console.error(`✗ DESCUADRE: cobro de plaza OK en Stripe pero BD no actualizada. Clínica ${clinic.id}, sub ${subId}`);
+      if (process.env.SENTRY_DSN) {
+        try { Sentry.captureMessage(`Descuadre plaza extra: cobrada en Stripe, BD sin actualizar`, { level: 'error', tags: { area: 'clinic_seats' }, extra: { clinicId: clinic.id, subId, newSeats } }); } catch(_){}
+      }
+      // Informar al usuario con honestidad y vía de resolución
+      return res.status(500).json({ error: "El pago se procesó, pero hubo un problema al activar la plaza. Contacta con soporte y lo resolvemos enseguida (no se te cobrará dos veces)." });
+    }
 
     console.log(`✓ Plazas ampliadas: clínica ${clinic.id} → ${newSeats} (sub ${subId})`);
     return res.json({ ok: true, seats: newSeats });
@@ -1313,20 +1335,34 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
   const { priceId, email, extraSeats, userId } = req.body;
   if (!priceId) return res.status(400).json({ error: "priceId requerido." });
 
-  // Price ID para profesionales extra (+5€/mes cada uno) — configurable por env var
+  // Anti-manipulación: el priceId debe ser uno de nuestros precios conocidos.
+  // Evita que alguien envíe un priceId arbitrario (p.ej. de otro producto más barato).
+  const KNOWN_PRICES = Object.values(PRICE_IDS).filter(Boolean);
+  if (!KNOWN_PRICES.includes(priceId)) {
+    return res.status(400).json({ error: "Plan no válido." });
+  }
+
+  // Price ID para profesionales extra — debe coincidir en intervalo con el plan
+  // (Stripe no permite mezclar items mensuales y anuales en una suscripción).
   const EXTRA_SEAT_PRICE = process.env.PRICE_EXTRA_SEAT || 'price_1Tcit7POSeyVBgtaC7CSaSJs';
+  const EXTRA_SEAT_PRICE_ANNUAL = process.env.PRICE_EXTRA_SEAT_ANNUAL || null;
 
   // Detectar si es plan anual
   const isAnual   = priceId === PRICE_IDS.individual_anual  || priceId === PRICE_IDS.clinica_anual;
   const isClinica = priceId === PRICE_IDS.clinica_mensual   || priceId === PRICE_IDS.clinica_anual;
 
+  // Elegir el precio de plaza extra que coincida con el intervalo del plan.
+  const seatPrice = isAnual ? EXTRA_SEAT_PRICE_ANNUAL : EXTRA_SEAT_PRICE;
+
   // Construir line_items
   const lineItems = [{ price: priceId, quantity: 1 }];
 
-  // Añadir profesionales extra si es plan clínica y se solicitan
+  // Añadir profesionales extra si es plan clínica y se solicitan.
+  // Si es anual pero no hay precio de plaza anual configurado, NO añadimos plazas
+  // aquí (evita el error de Stripe); el owner podrá añadirlas luego desde su cuenta.
   const seats = parseInt(extraSeats) || 0;
-  if (isClinica && seats > 0 && seats <= 20 && EXTRA_SEAT_PRICE) {
-    lineItems.push({ price: EXTRA_SEAT_PRICE, quantity: seats });
+  if (isClinica && seats > 0 && seats <= 20 && seatPrice) {
+    lineItems.push({ price: seatPrice, quantity: seats });
   }
 
   try {
@@ -1569,7 +1605,18 @@ app.post("/api/stripe/webhook", async (req, res) => {
       const email = session.customer_email || session.customer_details?.email;
       const priceId = session.metadata?.price_id || '';
       const metaUserId = session.metadata?.user_id || '';
-      const plan = PLAN_MAP[priceId] || 'individual_mensual';
+      // Mapear priceId → plan. Si no se reconoce (env var mal configurada, precio
+      // nuevo, etc.), NO degradar en silencio: avisar para no dar a un cliente de
+      // clínica el plan individual por error. Usamos el fallback solo como último
+      // recurso para no bloquear a quien ya pagó, pero lo reportamos como crítico.
+      let plan = PLAN_MAP[priceId];
+      if (!plan) {
+        plan = 'individual_mensual';
+        console.error(`✗ CRÍTICO: priceId desconocido en webhook: "${priceId}". Plan asignado por defecto; REVISAR manualmente.`);
+        if (process.env.SENTRY_DSN) {
+          try { Sentry.captureMessage(`priceId desconocido en webhook de pago: ${priceId}`, { level: 'error', tags: { area: 'webhook_plan' }, extra: { priceId, email: session.customer_email, metaUserId } }); } catch(_){}
+        }
+      }
       console.log(`✓ Pago completado: ${email} → ${plan} (priceId: ${priceId}, userId: ${metaUserId || 'no enviado'})`);
 
       if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
@@ -1607,6 +1654,13 @@ app.post("/api/stripe/webhook", async (req, res) => {
           if (userId) {
             await cancelClinicByOwner(userId);
             console.log(`✓ Plan cancelado en Supabase: ${userId}`);
+          } else {
+            // No se pudo identificar al usuario: su suscripción se canceló en Stripe
+            // pero seguiría con acceso en la app sin pagar. Hay que saberlo.
+            console.error(`✗ Cancelación sin usuario identificable (sub ${sub.id}, customer ${sub.customer}, email ${cancelEmail||'?'})`);
+            if (process.env.SENTRY_DSN) {
+              try { Sentry.captureMessage(`Cancelación de Stripe sin usuario identificable: acceso indebido posible`, { level: 'error', tags: { area: 'webhook_cancel' }, extra: { subId: sub.id, customer: sub.customer, email: cancelEmail } }); } catch(_){}
+            }
           }
         } catch(e) { console.error('Error cancelando plan:', e.message); }
       }
