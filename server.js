@@ -197,18 +197,72 @@ Educación: ${edu}`;
 // Detectar región probable del texto para añadir protocolo relevante
 function detectRegion(text) {
   const t = text.toLowerCase();
-  // Buscar todas las coincidencias y elegir la del keyword más largo/específico.
-  // Evita que palabras genéricas ("pie") ganen a términos específicos de otra región,
-  // y que el orden de inserción decida en textos que mencionan varias zonas.
-  let best = null, bestLen = 0;
+  // Puntuamos cada región: nº de keywords distintas que aparecen, y damos un
+  // pequeño extra a la coincidencia más específica (keyword más larga). Así una
+  // palabra genérica no gana a un término específico, pero tampoco perdemos una
+  // región que aparece varias veces. Devuelve la región ganadora (string) para
+  // mantener compatibilidad con quien llama a detectRegion directamente.
+  const scores = scoreRegions(t);
+  return scores.length ? scores[0].rid : null;
+}
+
+// Devuelve un ranking de regiones [{rid, score, maxLen}] ordenado de mayor a menor.
+function scoreRegions(textLower) {
+  const t = textLower;
+  const out = [];
   for (const [rid, keywords] of Object.entries(CLINICAL_KB.region_keywords)) {
+    let hits = 0, maxLen = 0;
     for (const kw of keywords) {
-      if (t.includes(kw) && kw.length > bestLen) {
-        best = rid; bestLen = kw.length;
-      }
+      if (t.includes(kw)) { hits++; if (kw.length > maxLen) maxLen = kw.length; }
     }
+    if (hits > 0) out.push({ rid, score: hits, maxLen });
   }
-  return best;
+  // Orden: primero por nº de coincidencias, y a igualdad, por keyword más larga
+  // (más específica). Esto resuelve los empates de forma clínicamente sensata.
+  out.sort((a, b) => b.score - a.score || b.maxLen - a.maxLen);
+  return out;
+}
+
+// Detecta hasta 2 regiones relevantes: la principal y una secundaria si tiene
+// suficiente presencia (≥2 coincidencias, o una keyword muy específica). Captura
+// los cuadros referidos (p.ej. cervical → brazo, lumbar → pierna) sin inflar el
+// prompt: 2 regiones siguen siendo pocas condiciones.
+function detectRegions(text) {
+  const scores = scoreRegions(text.toLowerCase());
+  if (!scores.length) return [];
+  const regions = [scores[0].rid];
+  if (scores[1] && (scores[1].score >= 2 || scores[1].maxLen >= 8)) {
+    regions.push(scores[1].rid);
+  }
+  return regions;
+}
+
+// Empareja el nombre de un test propuesto por la IA con uno de la KB de forma
+// robusta. Antes se comparaba solo la PRIMERA palabra (split(' ')[0]), lo que
+// confundía "Thomas" con "Thompson" o cualquier test que empezara por "Single"/
+// "Test". Ahora normalizamos (quitamos ruido como "test", "signo", "de") y
+// exigimos que coincida una palabra SIGNIFICATIVA (≥4 letras) o el nombre casi
+// completo. Más preciso y evita asignar la Se/Sp de un test a otro distinto.
+function _testNameMatch(a, b) {
+  if (!a || !b) return false;
+  const STOP = new Set(['test','signo','sign','de','del','la','el','of','prueba','maniobra','y','con',
+    // Palabras genéricas de posición/lado que NO identifican un test concreto:
+    'single','leg','pierna','rodilla','knee','hip','cadera','shoulder','hombro',
+    'derecha','izquierda','right','left','bilateral','active','activa','pasiva','passive',
+    'resistida','resisted','stress','raise','elevacion']);
+  const norm = s => s.toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // quita acentos
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/).filter(w => w && !STOP.has(w));
+  const wa = norm(a), wb = norm(b);
+  if (!wa.length || !wb.length) return false;
+  // Coincidencia si comparten alguna palabra significativa de ≥4 letras
+  // (p.ej. "thompson", "spurling", "lachman"), que es lo que identifica el test.
+  const sa = new Set(wa);
+  for (const w of wb) {
+    if (w.length >= 4 && sa.has(w)) return true;
+  }
+  return false;
 }
 
 // Obtener condiciones de una región de forma compacta
@@ -304,6 +358,7 @@ Devuelve ÚNICAMENTE este JSON (sin markdown ni texto extra). Usa la rama "prime
     "condition_id": "id exacto de la KB o null",
     "confianza": 0.75,
     "razonamiento": "qué patrones coinciden y cuáles no",
+    "prioridad_derivacion": "null en la mayoría de casos. Si hay banderas rojas de urgencia/emergencia, aquí va el aviso: qué descartar primero y la acción (p.ej. 'Descartar Cauda Equina antes de tratar: derivación urgente'). El diagnóstico fisioterapéutico queda SUPEDITADO a esto.",
     "diferenciales": [
       {"nombre": "diferencial", "probabilidad": 30, "condition_id": "id o null"}
     ]
@@ -358,7 +413,8 @@ IMPORTANTE — según el TIPO DE SESIÓN que se indique más abajo:
 
 REGLAS:
 - condition_id: ID exacto de la KB si coincide. Crítico para recuperación y tratamiento.
-- confianza 0.0-1.0: 1-2 patrones 0.3-0.5; 3-4 patrones 0.5-0.7; 5+ patrones 0.7-0.95.
+- BANDERAS ROJAS: si detectas una bandera roja de urgencia o emergencia, rellena hipotesis.prioridad_derivacion indicando qué hay que descartar y la acción, y refléjalo en el razonamiento ANTES del diagnóstico fisioterapéutico. La seguridad del paciente va primero: el diagnóstico musculoesquelético es secundario a descartar la patología grave.
+- confianza 0.0-1.0 (confianza NETA): cuenta los patrones que COINCIDEN menos los que CONTRADICEN la hipótesis. 1-2 patrones netos 0.3-0.5; 3-4 netos 0.5-0.7; 5+ netos 0.7-0.95. Si hay señales que contradicen el diagnóstico, baja la confianza y menciónalas en el razonamiento (no las ocultes).
 - estimacion_dias: usa rts_days de la KB si condition_id coincide.
 - Sin mención: [] para listas, "No mencionado" para texto.
 - Tratamiento exhaustivo: protocolos reales de fisioterapia.`;
@@ -459,9 +515,10 @@ app.post("/api/generate", rateLimit(20, 60_000), requireAuth(), async (req, res)
     ? "Always respond in English. Use physiotherapy clinical terminology in English."
     : "Responde siempre en español. Usa terminología clínica de fisioterapia en español.";
 
-  // Añadir protocolo detallado solo de la región detectada en la transcripción
-  const detectedRegion = detectRegion(text);
-  const regionProtocol = getRegionProtocols(detectedRegion);
+  // Añadir protocolos de las regiones detectadas (hasta 2: principal + referida).
+  // Capta cuadros irradiados sin perder los diferenciales de la zona secundaria.
+  const detectedRegions = detectRegions(text);
+  const regionProtocol = detectedRegions.map(r => getRegionProtocols(r)).filter(Boolean).join('\n');
 
   // ── Tipo de sesión: primera visita vs seguimiento ──────────────────────────
   // session_type lo envía el frontend; si no, se infiere de la presencia de episodio.
@@ -692,10 +749,7 @@ ${clinicalContext}${previousContext}`;
       if (t.sensibilidad || t.especificidad) return t;
       // Buscar en KB por nombre similar
       for (const [rid, tests] of Object.entries(CLINICAL_KB.tests_by_region)) {
-        const match = tests.find(kt =>
-          kt.n.toLowerCase().includes(t.nombre?.toLowerCase()?.split(' ')[0]) ||
-          t.nombre?.toLowerCase()?.includes(kt.n.toLowerCase().split(' ')[0])
-        );
+        const match = tests.find(kt => _testNameMatch(t.nombre, kt.n));
         if (match && (match.se || match.sp)) {
           t.sensibilidad = match.se ? Math.round(match.se*100)+'%' : null;
           t.especificidad = match.sp ? Math.round(match.sp*100)+'%' : null;
@@ -842,19 +896,19 @@ app.post("/api/rehipotesis", rateLimit(15, 60_000), requireAuth(), async (req, r
     ? tests.map(t => `${t.nombre || ''}: ${t.resultado || ''}${t.sensibilidad ? ` (Se ${t.sensibilidad}, Sp ${t.especificidad || '—'})` : ''}`).join('\n')
     : '';
 
-  const detectedRegion = detectRegion(text);
-  const regionProtocol = getRegionProtocols(detectedRegion);
+  const detectedRegions = detectRegions(text);
+  const regionProtocol = detectedRegions.map(r => getRegionProtocols(r)).filter(Boolean).join('\n');
 
   // Mismo criterio que /generate: solo región detectada + red flags.
   const clinicalContext = regionProtocol
     ? `${REDFLAGS_COMPACT}${regionProtocol}`
     : COMPACT_CONTEXT;
 
-  const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada.
+  const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada. Razonas de forma BAYESIANA: la historia y los síntomas establecen la probabilidad de partida (probabilidad pre-test), y los tests la AJUSTAN según su fuerza estadística. Los tests NO sustituyen al cuadro clínico: lo refinan.
 
 ${clinicalContext}
 
-TAREA: El fisioterapeuta ha COMPLETADO la exploración física y ha confirmado los resultados de los tests clínicos. Recalcula la hipótesis diagnóstica dando MÁXIMO PESO a los resultados de los tests confirmados (su sensibilidad y especificidad determinan cuánto modifican la probabilidad), junto con los signos y síntomas de la historia.
+TAREA: El fisioterapeuta ha COMPLETADO la exploración física y ha confirmado los resultados de los tests. Recalcula la hipótesis INTEGRANDO los tests con los signos y síntomas de la historia, ponderando cada test según su poder diagnóstico. El cuadro de síntomas es el ancla; cada test sube o baja la probabilidad en la medida que le corresponde por su sensibilidad y especificidad.
 
 TESTS CONFIRMADOS POR EL FISIOTERAPEUTA:
 ${testsTxt || 'Ninguno'}
@@ -862,22 +916,34 @@ ${testsTxt || 'Ninguno'}
 Devuelve ÚNICAMENTE este JSON, sin markdown ni texto adicional:
 {
   "hipotesis": {
-    "principal": "diagnóstico más probable tras integrar los tests (nombre exacto de la base de datos si coincide)",
+    "principal": "diagnóstico más probable tras integrar tests Y síntomas (nombre exacto de la base de datos si coincide)",
     "condition_id": "id exacto de la base de datos o null",
     "confianza": 0.75,
-    "razonamiento": "razonamiento clínico explicando cómo los tests confirmados modifican la hipótesis: qué confirman, qué descartan",
+    "razonamiento": "razonamiento clínico: cómo el cuadro de síntomas establece la base, y cómo cada test la modifica (qué refuerza, qué matiza, qué hallazgo es discordante si lo hay)",
     "diferenciales": [
       {"nombre": "diferencial 1", "probabilidad": 30, "condition_id": "id o null"},
       {"nombre": "diferencial 2", "probabilidad": 15, "condition_id": "id o null"}
-    ]
+    ],
+    "cambio_diagnostico": {"hubo_cambio": false, "antes": "dx previo o null", "despues": "dx nuevo o null", "motivo": "test concreto y por qué justifica el cambio, o null si no hubo cambio"}
   }
 }
 
-REGLAS:
-- Un test con alta especificidad (>85%) positivo CONFIRMA fuertemente la estructura que evalúa.
-- Un test con alta sensibilidad (>85%) negativo DESCARTA fuertemente la condición.
-- confianza: 0.0-1.0. Los tests confirmados deben moverla significativamente respecto a una valoración solo verbal.
-- El principal puede CAMBIAR si los tests apoyan más a un diferencial.`;
+PESO DE CADA TEST (cuánto debe mover la probabilidad):
+- Especificidad ≥90% POSITIVO → mueve MUCHO hacia confirmar (descarta poco si es negativo).
+- Sensibilidad ≥90% NEGATIVO → mueve MUCHO hacia descartar (confirma poco si es positivo).
+- Sensibilidad/Especificidad 75-89% → efecto MODERADO: refuerza o matiza, pero no decide por sí solo.
+- Sensibilidad/Especificidad <75%, o test SIN datos de Se/Sp → efecto LEVE: solo apoyo cualitativo, nunca confirma ni descarta por sí mismo.
+
+REGLA ANTI-VUELCO (crítica — evita que un test se cargue el cuadro clínico):
+- El diagnóstico principal NO cambia por un único test, SALVO que ese test sea de alta especificidad (≥85%) positivo, O de alta sensibilidad (≥85%) negativo, Y el nuevo diagnóstico sea coherente con AL MENOS un signo/síntoma de la historia.
+- Si un cuadro de síntomas es claro y coherente (varios patrones coincidentes) y UN test lo contradice, NO vuelques el diagnóstico: refleja ese test como "hallazgo discordante" en el razonamiento y mantén el principal, bajando algo la confianza.
+- Un cambio de principal requiere evidencia de tests FUERTE y COHERENTE (idealmente más de un test, o un test potente alineado con la historia), no un único hallazgo aislado.
+
+CONFIANZA (0.0-1.0):
+- Parte de la confianza pre-test (según patrones de síntomas coincidentes) y ajústala con los tests según su peso.
+- Tests potentes y concordantes con los síntomas → sube la confianza con claridad.
+- Hallazgos discordantes o tests débiles → la confianza sube poco o incluso baja.
+- No infles la confianza solo porque hay tests: un test débil aporta poco.`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
