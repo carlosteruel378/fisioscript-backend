@@ -29,10 +29,10 @@ const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SEC
 
 // ── Price IDs (configurar en Railway como variables de entorno) ───────────────
 const PRICE_IDS = {
-  individual_mensual: process.env.PRICE_INDIVIDUAL_MONTHLY || 'price_1TeJvuAJekfKUNa02VnyGS0D',
-  individual_anual:   process.env.PRICE_INDIVIDUAL_ANNUAL  || 'price_1TeJxEAJekfKUNa0ivDWecRA',
-  clinica_mensual:    process.env.PRICE_CLINICA_MONTHLY    || '',
-  clinica_anual:      process.env.PRICE_CLINICA_ANNUAL     || '',
+  individual_mensual: process.env.PRICE_INDIVIDUAL_MONTHLY || 'price_1TllayPOSeyVBgtaGCjW8MQF',
+  individual_anual:   process.env.PRICE_INDIVIDUAL_ANNUAL  || 'price_1TllblPOSeyVBgtaG7MboYdg',
+  clinica_mensual:    process.env.PRICE_CLINICA_MONTHLY    || 'price_1TlldbPOSeyVBgtaAi5svWWE',
+  clinica_anual:      process.env.PRICE_CLINICA_ANNUAL     || 'price_1TlleGPOSeyVBgtau2hQBmsN',
 };
 // Mapa inverso priceId → plan
 const PLAN_MAP = Object.fromEntries(
@@ -1276,7 +1276,7 @@ app.post("/api/clinic/seats", rateLimit(10, 60_000), async (req, res) => {
   if (!user) return res.status(401).json({ error: "No autorizado." });
 
   const EXTRA_SEAT_PRICE = process.env.PRICE_EXTRA_SEAT || 'price_1Tcit7POSeyVBgtaC7CSaSJs';
-  const EXTRA_SEAT_PRICE_ANNUAL = process.env.PRICE_EXTRA_SEAT_ANNUAL || null;
+  const EXTRA_SEAT_PRICE_ANNUAL = process.env.PRICE_EXTRA_SEAT_ANNUAL || 'price_1TkgbePOSeyVBgtajlYXPiy2';
 
   try {
     // 1. Verificar que es owner de una clínica
@@ -1376,8 +1376,13 @@ app.post("/api/clinic/seats", rateLimit(10, 60_000), async (req, res) => {
 // ── POST /api/stripe/portal ───────────────────────────────────────────────────
 app.post("/api/stripe/portal", rateLimit(10, 60_000), async (req, res) => {
   if (!stripe) return res.status(500).json({ error: "Stripe no configurado." });
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: "Email requerido." });
+  // Seguridad: autenticar al usuario y usar SU email verificado, no uno del body.
+  // Si confiáramos en el email del body, cualquiera podría abrir el portal de
+  // facturación de otro cliente (ver facturas, cancelar su plan). IDOR.
+  const user = await verifyUser(req);
+  if (!user) return res.status(401).json({ error: "No autorizado." });
+  const email = user.email;
+  if (!email) return res.status(400).json({ error: "Tu cuenta no tiene email asociado." });
   try {
     // Find customer by email
     const customers = await stripe.customers.list({ email, limit: 1 });
@@ -1411,7 +1416,7 @@ app.post("/api/stripe/checkout", rateLimit(10, 60_000), async (req, res) => {
   // Price ID para profesionales extra — debe coincidir en intervalo con el plan
   // (Stripe no permite mezclar items mensuales y anuales en una suscripción).
   const EXTRA_SEAT_PRICE = process.env.PRICE_EXTRA_SEAT || 'price_1Tcit7POSeyVBgtaC7CSaSJs';
-  const EXTRA_SEAT_PRICE_ANNUAL = process.env.PRICE_EXTRA_SEAT_ANNUAL || null;
+  const EXTRA_SEAT_PRICE_ANNUAL = process.env.PRICE_EXTRA_SEAT_ANNUAL || 'price_1TkgbePOSeyVBgtajlYXPiy2';
 
   // Detectar si es plan anual
   const isAnual   = priceId === PRICE_IDS.individual_anual  || priceId === PRICE_IDS.clinica_anual;
@@ -1791,6 +1796,40 @@ app.listen(PORT, () => {
   console.log(`   STRIPE:          ${process.env.STRIPE_SECRET_KEY ? "✓ " + process.env.STRIPE_SECRET_KEY.slice(0,12) + "..." : "✗"}`);
   console.log(`   SUPABASE:        ${process.env.SUPABASE_URL ? "✓" : "✗ (sin actualización plan auto)"}`);
   console.log(`   Clinical KB:     ${CLINICAL_KB.conditions.length} condiciones | ${Object.values(CLINICAL_KB.tests_by_region).flat().length} tests | ${CLINICAL_KB.red_flags.length} red flags\n`);
+
+  // ── Verificación de precios al arrancar ──────────────────────────────────
+  // El código tiene los IDs de producción como default, pero conviene saber si
+  // las env vars de Railway están puestas (configuración explícita) o si se está
+  // tirando del default. Si una env var falta, avisamos para revisarlo antes de
+  // abrir pagos. Si ningún precio resuelve a un valor, es un error grave.
+  const priceEnvVars = {
+    PRICE_INDIVIDUAL_MONTHLY: PRICE_IDS.individual_mensual,
+    PRICE_INDIVIDUAL_ANNUAL:  PRICE_IDS.individual_anual,
+    PRICE_CLINICA_MONTHLY:    PRICE_IDS.clinica_mensual,
+    PRICE_CLINICA_ANNUAL:     PRICE_IDS.clinica_anual,
+    PRICE_EXTRA_SEAT:         process.env.PRICE_EXTRA_SEAT || 'price_1Tcit7POSeyVBgtaC7CSaSJs',
+    PRICE_EXTRA_SEAT_ANNUAL:  process.env.PRICE_EXTRA_SEAT_ANNUAL || 'price_1TkgbePOSeyVBgtajlYXPiy2',
+  };
+  const faltantes = [];
+  const vacios = [];
+  console.log('   Precios Stripe:');
+  for (const [name, resolved] of Object.entries(priceEnvVars)) {
+    const fromEnv = !!process.env[name];
+    if (!resolved) { vacios.push(name); console.log(`     ✗ ${name}: SIN VALOR (ni env var ni default)`); continue; }
+    if (!fromEnv) faltantes.push(name);
+    console.log(`     ${fromEnv ? '✓' : '⚠'} ${name}: ${resolved.slice(0,18)}… ${fromEnv ? '(env)' : '(DEFAULT del código)'}`);
+  }
+  if (vacios.length) {
+    console.error(`   ✗ CRÍTICO: precios sin valor: ${vacios.join(', ')}. El checkout fallará para esos planes.`);
+    if (process.env.SENTRY_DSN) { try { Sentry.captureMessage(`Precios sin valor al arrancar: ${vacios.join(', ')}`, { level: 'error', tags: { area: 'price_config' } }); } catch(_){} }
+  }
+  if (faltantes.length) {
+    console.warn(`   ⚠ Estas env vars de precio NO están en Railway (se usa el default del código): ${faltantes.join(', ')}. Verifica que el default sea el correcto.`);
+  }
+  if (!vacios.length && !faltantes.length) {
+    console.log('   ✓ Todos los precios vienen de env vars de Railway.');
+  }
+  console.log('');
 }).on('error', (err) => {
   console.error('❌ Error arrancando servidor:', err.message);
   process.exit(1);
