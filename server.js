@@ -1206,14 +1206,32 @@ app.post("/api/clinic/member", rateLimit(10, 60_000), async (req, res) => {
       return res.status(500).json({ error: "No se pudo añadir el miembro." });
     }
 
+    // 5b. Re-comprobar el límite TRAS insertar (cierra la carrera de dos invitaciones
+    // simultáneas que leyeron el conteo a la vez). Si al recontar nos hemos pasado
+    // del límite Y este usuario es el sobrante (no estaba ya dentro), lo quitamos.
+    try {
+      const recheckRes = await fetch(`${SB_REST()}/clinic_members?clinic_id=eq.${clinic.id}&select=user_id`, { headers: sbAdmin() });
+      const after = await recheckRes.json();
+      const wasAlreadyMember = Array.isArray(members) && members.some(m => m.user_id === invitedId);
+      if (Array.isArray(after) && after.length > clinic.seats && !wasAlreadyMember) {
+        // Nos pasamos por una inserción concurrente: revertir esta.
+        await fetch(`${SB_REST()}/clinic_members?clinic_id=eq.${clinic.id}&user_id=eq.${invitedId}`, {
+          method: 'DELETE', headers: sbAdmin(),
+        });
+        return res.status(409).json({ error: `Se han ocupado todas las plazas (${clinic.seats}) mientras añadías a este fisioterapeuta. Amplía las plazas e inténtalo de nuevo.` });
+      }
+    } catch(e) {
+      console.warn('Re-chequeo de plazas tras insertar miembro falló (no crítico):', e.message);
+    }
+
     // 6. Marcar el plan del invitado como clinica (para que pase el muro de acceso).
     // Reintentamos hasta 3 veces ante fallos transitorios, porque si esto falla
     // el fisio queda sin acceso. Solo si los 3 intentos fallan avisamos al dueño.
     let planUpdated = false;
     for (let intento = 1; intento <= 3; intento++) {
       try {
-        const r = await updateUserPlan(invitedId, clinic.plan);
-        if (!r || r.ok !== false) { planUpdated = true; break; }
+        await updateUserPlan(invitedId, clinic.plan);
+        planUpdated = true; break; // si no lanzó, fue correcto
       } catch(e) {
         console.error(`Error actualizando plan del invitado (intento ${intento}/3):`, e.message);
         if (intento === 3 && process.env.SENTRY_DSN) {
@@ -1323,46 +1341,70 @@ app.post("/api/clinic/seats", rateLimit(10, 60_000), async (req, res) => {
 
     // Tope de seguridad: no permitir crecer sin límite (5 base + 20 extra = 25).
     const MAX_SEATS = 25;
-    if ((clinic.seats || 5) >= MAX_SEATS) {
+    const currentSeats = clinic.seats || 5;
+    if (currentSeats >= MAX_SEATS) {
       return res.status(400).json({ error: `Has alcanzado el máximo de ${MAX_SEATS} plazas. Contacta con soporte si necesitas más.` });
     }
 
-    const extraItem = sub.items.data.find(it => it.price?.id === seatPrice);
-    if (extraItem) {
-      await stripe.subscriptionItems.update(extraItem.id, {
-        quantity: (extraItem.quantity || 0) + 1,
-        proration_behavior: 'create_prorations',
-      });
-    } else {
-      await stripe.subscriptionItems.create({
-        subscription: subId,
-        price: seatPrice,
-        quantity: 1,
-        proration_behavior: 'create_prorations',
-      });
+    // ── RESERVA ATÓMICA (anti doble-cobro) ───────────────────────────────────
+    // Antes de cobrar en Stripe, "reservamos" la plaza con un UPDATE condicional:
+    // incrementamos seats SOLO si sigue valiendo lo que leímos (compare-and-swap).
+    // Si dos peticiones simultáneas (doble clic) leyeron el mismo valor, solo una
+    // gana la reserva; la otra no hace match y se rechaza ANTES de cobrar. Así es
+    // imposible cobrar dos veces por la misma plaza.
+    const newSeats = currentSeats + 1;
+    let reserved = false;
+    try {
+      const casRes = await fetch(
+        `${SB_REST()}/clinics?id=eq.${clinic.id}&seats=eq.${currentSeats}`,
+        { method: 'PATCH', headers: { ...sbAdmin(), 'Prefer': 'return=representation' },
+          body: JSON.stringify({ seats: newSeats }) }
+      );
+      if (casRes.ok) {
+        const rows = await casRes.json();
+        reserved = Array.isArray(rows) && rows.length === 1; // exactamente 1 fila actualizada
+      }
+    } catch(e) { reserved = false; }
+
+    if (!reserved) {
+      // Otra petición ganó la reserva (o el valor cambió). No cobramos.
+      console.warn(`Reserva de plaza no concedida (posible doble clic): clínica ${clinic.id}, seats esperados ${currentSeats}`);
+      return res.status(409).json({ error: "Otra operación de plazas está en curso. Espera un momento y revisa el número de plazas antes de volver a intentarlo." });
     }
 
-    // 4. Incrementar las plazas en la base de datos.
-    // CRÍTICO: el cobro en Stripe ya se hizo. Si este PATCH falla, el cliente
-    // habría pagado sin recibir la plaza → descuadre. Lo detectamos y reportamos
-    // para corregirlo manualmente (no dejamos que falle en silencio).
-    const newSeats = (clinic.seats || 5) + 1;
-    let dbOk = false;
-    try {
-      const patchRes = await fetch(`${SB_REST()}/clinics?id=eq.${clinic.id}`, {
-        method: 'PATCH', headers: sbAdmin(),
-        body: JSON.stringify({ seats: newSeats }),
-      });
-      dbOk = patchRes.ok;
-    } catch(e) { dbOk = false; }
-
-    if (!dbOk) {
-      console.error(`✗ DESCUADRE: cobro de plaza OK en Stripe pero BD no actualizada. Clínica ${clinic.id}, sub ${subId}`);
-      if (process.env.SENTRY_DSN) {
-        try { Sentry.captureMessage(`Descuadre plaza extra: cobrada en Stripe, BD sin actualizar`, { level: 'error', tags: { area: 'clinic_seats' }, extra: { clinicId: clinic.id, subId, newSeats } }); } catch(_){}
+    // A partir de aquí la plaza está reservada en BD. Si Stripe falla, revertimos.
+    const revertReservation = async () => {
+      try {
+        await fetch(`${SB_REST()}/clinics?id=eq.${clinic.id}&seats=eq.${newSeats}`, {
+          method: 'PATCH', headers: sbAdmin(), body: JSON.stringify({ seats: currentSeats }),
+        });
+      } catch(_) {
+        console.error(`✗ No se pudo revertir la reserva de plaza (clínica ${clinic.id}). Requiere revisión manual.`);
+        if (process.env.SENTRY_DSN) { try { Sentry.captureMessage('Fallo al revertir reserva de plaza', { level:'error', tags:{area:'clinic_seats'}, extra:{ clinicId: clinic.id, newSeats } }); } catch(_){} }
       }
-      // Informar al usuario con honestidad y vía de resolución
-      return res.status(500).json({ error: "El pago se procesó, pero hubo un problema al activar la plaza. Contacta con soporte y lo resolvemos enseguida (no se te cobrará dos veces)." });
+    };
+
+    // ── Cobro en Stripe (la plaza ya está reservada) ─────────────────────────
+    const extraItem = sub.items.data.find(it => it.price?.id === seatPrice);
+    try {
+      if (extraItem) {
+        await stripe.subscriptionItems.update(extraItem.id, {
+          quantity: (extraItem.quantity || 0) + 1,
+          proration_behavior: 'create_prorations',
+        });
+      } else {
+        await stripe.subscriptionItems.create({
+          subscription: subId,
+          price: seatPrice,
+          quantity: 1,
+          proration_behavior: 'create_prorations',
+        });
+      }
+    } catch(stripeErr) {
+      // El cobro falló → revertir la reserva para no dejar la plaza "fantasma".
+      console.error('Stripe falló al ampliar plaza, revirtiendo reserva:', stripeErr.message);
+      await revertReservation();
+      return res.status(502).json({ error: "No se pudo procesar el pago de la plaza. No se te ha cobrado. Inténtalo de nuevo." });
     }
 
     console.log(`✓ Plazas ampliadas: clínica ${clinic.id} → ${newSeats} (sub ${subId})`);
@@ -1524,11 +1566,20 @@ async function updateUserPlan(userId, plan) {
     }
   } catch(e) { /* if fetch fails, proceed with just the plan */ }
 
-  return fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
+  const resp = await fetch(`${process.env.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
     method: 'PUT',
     headers,
     body: JSON.stringify({ user_metadata: { ...existing, plan } }),
   });
+  // Comprobar el resultado: fetch NO lanza ante un 4xx/5xx, así que si no lo
+  // verificamos, un fallo de Supabase pasaría desapercibido y el webhook
+  // respondería 200 (sin reintento) dejando al cliente pagado sin plan. Lanzamos
+  // para que quien llama (con try/catch) detecte el fallo y actúe (reintento).
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    throw new Error(`updateUserPlan falló (${resp.status}): ${txt.slice(0, 200)}`);
+  }
+  return resp;
 }
 
 // Cancela una clínica entera cuando el dueño deja de pagar:
@@ -1670,6 +1721,14 @@ app.post("/api/stripe/webhook", async (req, res) => {
 
   console.log(`Stripe event: ${event.type}`);
 
+  // Marca de fallo que MERECE reintento de Stripe. Solo se activa para fallos
+  // críticos donde el cliente ya pagó pero no recibió su plan. Al final, si está
+  // activa, respondemos 500 para que Stripe reintente el webhook (lo hace con
+  // backoff durante ~3 días). Para fallos no críticos (p.ej. una cancelación que
+  // no se pudo aplicar) NO forzamos reintento: respondemos 200 y lo dejamos en
+  // Sentry, porque reintentar no aporta y el cliente no queda perjudicado.
+  let needsRetry = false;
+
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object;
@@ -1703,14 +1762,38 @@ app.post("/api/stripe/webhook", async (req, res) => {
                 const extraSeats = parseInt(session.metadata?.extra_seats || '0') || 0;
                 await ensureClinic(userId, email, plan, 5 + extraSeats, session.subscription || null, session.customer || null);
               } catch(e) {
-                console.error('Error creando clínica:', e.message);
-                if (process.env.SENTRY_DSN) Sentry.captureException(e, { tags: { area: 'webhook_clinica' }, extra: { email, plan } });
+                // El plan ya se activó, pero la clínica no se creó. El cliente de
+                // clínica necesita su clínica → pedimos reintento. ensureClinic es
+                // idempotente (crea solo si no existe), así que reintentar es seguro.
+                console.error('✗ Error creando clínica tras pago:', e.message);
+                needsRetry = true;
+                if (process.env.SENTRY_DSN) Sentry.captureException(e, { tags: { area: 'webhook_clinica' }, extra: { email, plan, note: 'Plan activado pero clínica no creada; se reintentará' } });
               }
             }
           } else {
-            console.warn(`⚠ Usuario no encontrado (userId: ${metaUserId}, email: ${email})`);
+            // El pago se completó pero no encontramos al usuario. Puede ser un
+            // problema temporal (el registro aún no se ha propagado). Pedimos a
+            // Stripe que reintente, porque el cliente pagó y necesita su plan.
+            console.warn(`⚠ Usuario no encontrado tras pago (userId: ${metaUserId}, email: ${email}). Se solicitará reintento.`);
+            needsRetry = true;
+            if (process.env.SENTRY_DSN) {
+              try { Sentry.captureMessage(`Pago completado pero usuario no encontrado (se reintentará)`, { level: 'warning', tags: { area: 'webhook_plan' }, extra: { email, metaUserId, plan } }); } catch(_){}
+            }
           }
-        } catch(e) { console.error('Error actualizando plan:', e.message); }
+        } catch(e) {
+          // updateUserPlan (o resolveUserId) falló: el cliente PAGÓ pero no tiene
+          // plan. Esto es crítico → pedimos reintento a Stripe respondiendo 500.
+          console.error('✗ CRÍTICO: error actualizando plan tras pago:', e.message);
+          needsRetry = true;
+          if (process.env.SENTRY_DSN) {
+            try { Sentry.captureException(e, { level: 'error', tags: { area: 'webhook_plan' }, extra: { email, plan, metaUserId, note: 'Cliente pagó sin recibir plan; Stripe reintentará' } }); } catch(_){}
+          }
+        }
+      } else {
+        // Sin Supabase configurado no podemos activar el plan; si esto ocurre en
+        // producción tras un pago, conviene reintentar cuando se restablezca.
+        console.error('✗ Pago completado pero Supabase no está configurado: no se pudo activar el plan.');
+        needsRetry = true;
       }
       break;
     }
@@ -1778,6 +1861,12 @@ app.post("/api/stripe/webhook", async (req, res) => {
       }
       break;
     }
+  }
+  // Si hubo un fallo crítico (cliente pagó pero no recibió plan/clínica),
+  // respondemos 500 para que Stripe reintente el webhook automáticamente.
+  // En el resto de casos, 200 (procesado).
+  if (needsRetry) {
+    return res.status(500).json({ error: "Procesamiento incompleto; reintentar." });
   }
   return res.json({ received: true });
 });
