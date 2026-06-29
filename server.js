@@ -424,6 +424,18 @@ REGLAS:
 const REDFLAGS_COMPACT = 'BANDERAS ROJAS:\n' +
   CLINICAL_KB.red_flags.map(r => `⚠${r.n}→${r.sug} (${r.urg})`).join('\n');
 
+// Índice MÍNIMO de condiciones (solo id|región|nombre) + regiones disponibles.
+// Se usa como fallback cuando NO se detecta región en la transcripción. Pesa
+// ~1000 tokens, frente a los ~4200 de volcar toda la KB compacta. Es suficiente
+// para que la IA oriente el caso y pida concretar la zona si hace falta, sin
+// disparar el consumo de tokens en consultas cortas o poco específicas.
+const REGIONS_INDEX = 'REGIONES DISPONIBLES: ' +
+  Object.entries(CLINICAL_KB.regions || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+const CONDITIONS_INDEX = 'ÍNDICE DE CONDICIONES (id|región|nombre):\n' +
+  CLINICAL_KB.conditions.map(c => `[${c.id}|${c.r}] ${c.n}`).join('\n');
+// Fallback ligero: banderas rojas (seguridad) + regiones + índice de condiciones.
+const FALLBACK_NO_REGION = `${REDFLAGS_COMPACT}\n\n${REGIONS_INDEX}\n\n${CONDITIONS_INDEX}`;
+
 // ── POST /api/transcribe — Whisper (Groq) ─────────────────────────────────────
 // Recibe audio binario (webm/opus), lo transcribe con Whisper y devuelve el texto.
 // El audio NO se almacena: se procesa en memoria y se descarta.
@@ -479,9 +491,19 @@ app.post("/api/transcribe", rateLimit(20, 60_000), requireAuth(), async (req, re
   try {
     let response = await callGroq();
 
-    // Reintento único ante saturación (429) o error de servidor de Groq (5xx)
+    // Reintento ante saturación (429) o error de servidor de Groq (5xx).
+    // Para el 429 (límite de tokens/min), respetamos el tiempo que Groq indica
+    // ("try again in Ns") en vez de un valor fijo: si pide 24s y solo esperamos
+    // 2s, el reintento volvería a fallar. Tope de 30s para no colgar la petición.
     if (response.status === 429 || response.status >= 500) {
-      await new Promise(r => setTimeout(r, 2000));
+      let waitMs = 2000;
+      if (response.status === 429) {
+        const errBody = await response.clone().json().catch(() => ({}));
+        const m = (errBody?.error?.message || '').match(/try again in ([\d.]+)\s*s/i);
+        if (m) waitMs = Math.min(Math.ceil(parseFloat(m[1]) * 1000) + 500, 30_000);
+      }
+      console.warn(`Whisper ${response.status}: esperando ${waitMs}ms y reintentando.`);
+      await new Promise(r => setTimeout(r, waitMs));
       response = await callGroq();
     }
 
@@ -582,8 +604,11 @@ Esta es una REVISIÓN, no una primera visita. NO repitas la anamnesis (anteceden
   if (regionProtocol) {
     clinicalContext = `${REDFLAGS_COMPACT}${regionProtocol}`;
   } else {
-    // Sin región detectada: contexto compacto completo como fallback
-    clinicalContext = COMPACT_CONTEXT;
+    // Sin región detectada: fallback LIGERO (banderas rojas + índice de
+    // condiciones y regiones), ~1000 tokens en vez de los ~4200 de volcar toda
+    // la KB. Evita que una consulta corta o poco específica dispare el consumo
+    // de tokens (era la causa de los 429 con audios breves).
+    clinicalContext = FALLBACK_NO_REGION;
   }
 
   // ── PROMPT EN DOS BLOQUES PARA APROVECHAR EL PROMPT CACHING DE GROQ ──────────
@@ -610,7 +635,10 @@ TIPO DE SESIÓN: ${sessionRule}
 ${clinicalContext}${previousContext}`;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 35_000);
+  // 70s para dar margen al reintento tras un 429 (que puede esperar hasta 30s):
+  // primera llamada + espera + reintento + margen. Sin esto, el abort mataría el
+  // reintento a mitad.
+  const timeout = setTimeout(() => controller.abort(), 70_000);
 
   // Salvaguarda de longitud: el modelo tiene un límite de contexto. Una
   // transcripción muy larga (consulta de 30+ min) + system prompt + 4000 tokens
@@ -654,6 +682,23 @@ ${clinicalContext}${previousContext}`;
       const errBody = await response.clone().json().catch(() => ({}));
       console.warn('Groq 413 (TPM), reintentando con max_tokens reducido:', JSON.stringify(errBody).slice(0,200));
       response = await callGroqGen(1500);
+    }
+
+    // Si Groq rechaza por límite de tokens POR MINUTO (429), no es que la consulta
+    // sea inválida: es que se ha consumido la cuota del minuto. Groq indica cuántos
+    // segundos faltan para que se libere. Esperamos ese tiempo (con un tope) y
+    // reintentamos UNA vez, para que el usuario no pierda su consulta por un pico.
+    if (response.status === 429) {
+      const errBody = await response.clone().json().catch(() => ({}));
+      const msg = errBody?.error?.message || '';
+      // Extraer "try again in 24s" o "in 29.82s" del mensaje de Groq
+      const m = msg.match(/try again in ([\d.]+)\s*s/i);
+      let waitMs = m ? Math.ceil(parseFloat(m[1]) * 1000) : 8000;
+      // Tope de seguridad: no esperar más de 30s (no bloquear la petición eternamente)
+      waitMs = Math.min(waitMs + 500, 30_000); // +500ms de margen
+      console.warn(`Groq 429 (TPM): esperando ${waitMs}ms y reintentando una vez.`);
+      await new Promise(r => setTimeout(r, waitMs));
+      response = await callGroqGen(2500);
     }
 
     clearTimeout(timeout);
@@ -899,10 +944,11 @@ app.post("/api/rehipotesis", rateLimit(15, 60_000), requireAuth(), async (req, r
   const detectedRegions = detectRegions(text);
   const regionProtocol = detectedRegions.map(r => getRegionProtocols(r)).filter(Boolean).join('\n');
 
-  // Mismo criterio que /generate: solo región detectada + red flags.
+  // Mismo criterio que /generate: solo región detectada + red flags. Sin región,
+  // fallback ligero (no toda la KB) para no disparar el consumo de tokens.
   const clinicalContext = regionProtocol
     ? `${REDFLAGS_COMPACT}${regionProtocol}`
-    : COMPACT_CONTEXT;
+    : FALLBACK_NO_REGION;
 
   const system = `Eres un fisioterapeuta clínico experto con acceso a una base de conocimiento validada. Razonas de forma BAYESIANA: la historia y los síntomas establecen la probabilidad de partida (probabilidad pre-test), y los tests la AJUSTAN según su fuerza estadística. Los tests NO sustituyen al cuadro clínico: lo refinan.
 
