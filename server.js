@@ -1001,7 +1001,10 @@ app.get("/api/clinical/region/:id", requireAuth(), (req, res) => {
 });
 
 // ── GET /api/prices ───────────────────────────────────────────────────────────
-app.get("/api/prices", (req, res) => {
+// Devuelve los price IDs públicos para que el frontend inicie el checkout.
+// Rate limit generoso (60/min): el uso legítimo son 1-2 llamadas por intento de
+// pago, pero el límite corta un martilleo automatizado del endpoint.
+app.get("/api/prices", rateLimit(60, 60_000), (req, res) => {
   res.json({
     individual_mensual: PRICE_IDS.individual_mensual,
     individual_anual:   PRICE_IDS.individual_anual,
