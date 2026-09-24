@@ -27,6 +27,27 @@ Object.entries(CLINICAL_KB.tests_by_region).forEach(([rid, tests]) => {
 // ── Stripe ───────────────────────────────────────────────────────────────────
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
+// ── Modelo de lenguaje (Groq) ────────────────────────────────────────────────
+// Groq retiró llama-3.3-70b-versatile el 16/08/2026 (404 model_not_found).
+// Sustituto recomendado por Groq: openai/gpt-oss-120b. El modelo es configurable
+// por entorno (GROQ_MODEL) para que la próxima retirada sea un cambio en Railway,
+// no un redespliegue de código.
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
+// GPT-OSS es un modelo de razonamiento: estos parámetros SOLO se envían a él
+// (otros modelos podrían rechazarlos con 400).
+const GROQ_IS_REASONING = /^openai\/gpt-oss/.test(GROQ_MODEL);
+const GROQ_REASONING = GROQ_IS_REASONING
+  ? {
+      // 'low': pocos tokens de razonamiento → latencia y consumo similares a Llama
+      reasoning_effort: ["low", "medium", "high"].includes(process.env.GROQ_REASONING_EFFORT) ? process.env.GROQ_REASONING_EFFORT : "low",
+      // El razonamiento no se usa: que no viaje en la respuesta
+      include_reasoning: false,
+    }
+  : {};
+// Los tokens de razonamiento cuentan dentro de max_tokens: margen para que la
+// respuesta no se quede sin espacio (JSON truncado o contenido vacío).
+const groqTok = (n) => (GROQ_IS_REASONING ? n + 600 : n);
+
 // ── Price IDs (configurar en Railway como variables de entorno) ───────────────
 const PRICE_IDS = {
   individual_mensual: process.env.PRICE_INDIVIDUAL_MONTHLY || 'price_1TllayPOSeyVBgtaGCjW8MQF',
@@ -662,7 +683,8 @@ ${clinicalContext}${previousContext}`;
         "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
+        ...GROQ_REASONING,
         max_tokens: maxTok,
         temperature: 0.1,
         messages: [
@@ -673,7 +695,7 @@ ${clinicalContext}${previousContext}`;
       signal: controller.signal,
     });
 
-    let response = await callGroqGen(2500);
+    let response = await callGroqGen(groqTok(2500));
 
     // Si Groq rechaza por exceder el límite TPM (413/rate_limit en tokens),
     // reintentamos UNA vez pidiendo menos tokens de respuesta. Así una consulta
@@ -681,7 +703,11 @@ ${clinicalContext}${previousContext}`;
     if (response.status === 413) {
       const errBody = await response.clone().json().catch(() => ({}));
       console.warn('Groq 413 (TPM), reintentando con max_tokens reducido:', JSON.stringify(errBody).slice(0,200));
-      response = await callGroqGen(1500);
+      // Groq indica "Limit X, Requested Y": ajustamos max_tokens para caber justo
+      // en el límite. Si el mensaje no trae esas cifras, el valor fijo de siempre.
+      const tpm = String(errBody?.error?.message || '').match(/Limit\s+(\d+)\D+Requested\s+(\d+)/i);
+      const fit = tpm ? groqTok(2500) - (Number(tpm[2]) - Number(tpm[1])) - 100 : 0;
+      response = await callGroqGen(fit >= 800 ? fit : groqTok(1500));
     }
 
     // Si Groq rechaza por límite de tokens POR MINUTO (429), no es que la consulta
@@ -698,7 +724,7 @@ ${clinicalContext}${previousContext}`;
       waitMs = Math.min(waitMs + 500, 30_000); // +500ms de margen
       console.warn(`Groq 429 (TPM): esperando ${waitMs}ms y reintentando una vez.`);
       await new Promise(r => setTimeout(r, waitMs));
-      response = await callGroqGen(2500);
+      response = await callGroqGen(groqTok(2500));
     }
 
     clearTimeout(timeout);
@@ -842,10 +868,11 @@ ${sessions.slice(0, 6000)}`;
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
+        ...GROQ_REASONING,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.4,
-        max_tokens: 400,
+        max_tokens: groqTok(400),
       }),
       signal: controller.signal,
     });
@@ -900,10 +927,11 @@ ${sessions.slice(0, 6000)}`;
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
+        ...GROQ_REASONING,
         messages: [{ role: "user", content: prompt }],
         temperature: 0.3,
-        max_tokens: 900,
+        max_tokens: groqTok(900),
         response_format: { type: "json_object" },
       }),
       signal: controller.signal,
@@ -998,13 +1026,14 @@ CONFIANZA (0.0-1.0):
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
+        ...GROQ_REASONING,
         messages: [
           { role: "system", content: system },
           { role: "user", content: `Historia clínica y tests:\n\n${text}` },
         ],
         temperature: 0.1,
-        max_tokens: 1200,
+        max_tokens: groqTok(1200),
         response_format: { type: "json_object" },
       }),
       signal: controller.signal,
